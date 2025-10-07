@@ -1,0 +1,6 @@
+	TCP connection
+Client => => => => => server
+
+	KEX server pub key, ephemeral key, signature
+server => => => => => => => => => => => => => => => client
+	

@@ -1,0 +1,5 @@
+increment counters for every BlobTimeoutError/BlobEOFError. That lets you detect attacks or flakey clients.
+add ensure to tell client the server raised an error during payload transfer
+add nonce check 
+chatgpt chat (server authentication methods) make sure the private/public key pair for server identification is managed safely
+	in this moment the server host keys are not safely handled

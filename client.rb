@@ -7,31 +7,36 @@ require_relative 'utils'
 class SecureClient
   def initialize(host, port)
     @host, @port = host, port
+
+    @client_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
+    @client_pk = @client_sk.verify_key
   end
 
   def send_message(msg)
+    
+    # establish a connection with the server
     sock = TCPSocket.new(@host, @port)
 
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    # Receive host pub, server eph pub, signature
-    host_pk = RbNaCl::VerifyKey.new(utils.read_blob(sock))
-    server_eph_pk = utils.read_blob(sock)
-    sig = utils.read_blob(sock)
+    # Sign ephemeral pub with host key, creates a signature
+    sig = @client_sk.sign(eph_pk.to_bytes)
 
-    # Verify signature
-    host_pk.verify(sig, server_eph_pk)
+    # obtain and validate keys
+    keys = utils.receive_and_check()
 
-    	
-    server_eph_pk = RbNaCl::PublicKey.new(server_eph_pk)
+    # Receive server's public key, ephemeral public key and signature
+    server_pk = keys[:public_key]
+    server_eph_pk = keys[:ephemeral_key]
+    salt = keys[:salt]
 
-    # 3) Shared secret
-    shared_secret = eph_sk.exchange(server_eph_pk)
+    # Send public signing key and ephemeral key (kex)
+    utils.send_kex(sock, @host_pk, eph_pk, sig, salt = nil)
 
     # 4) Derive keys
-    key_material = OpenSSL::KDF.hkdf(shared_secret, salt: "", info: "ssh-like", length: 64, hash: "SHA256")
+    key_material = utils.key_material_func(eph_sk, eph_pk, server_eph_pk, salt) 
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 

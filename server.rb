@@ -5,14 +5,11 @@ require 'securerandom'
 require_relative 'utils'
 
 # used for error handling
+class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
 
 # === Server ===
 class SecureServer
-
-# guarantee that the size sent is of max 16MB
-MAX_BLOB_SIZE = 16 * 1024 * 1024
-
 
   # handles a single client 
   def handle_client(sock)
@@ -24,7 +21,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     sig = @host_sk.sign(eph_pk.to_bytes)
 
     # Send public signing key and ephemeral key (kex)
-    send_keys(sock, @host_pk, eph_pk, sig)
+    send_kex(sock, @host_pk, eph_pk, sig)
     
     # Receive client ephemeral public key and stores it
     client_eph_pk = utils.read_blob(sock)
@@ -120,7 +117,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
 
   # this function is used to send the host public and ephemeral keys as well as the signature 
-  def send_keys(sock, @host_pk, eph_pk, sig)
+  def send_kex(sock, @host_pk, eph_pk, sig)
 
     # input validation
     raise ArgumentError, "Socket is nil" if sock.nil?

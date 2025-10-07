@@ -1,7 +1,7 @@
 # reading and writing functions
 module utilities
 
-  def read_blob(sock, MAX_BLOB_SIZE, timeout: 10)
+  def read_blob(sock, MAX_BLOB_SIZE = 16 * 1024 * 1024, timeout: 10)
     # read header (4 bytes), waits 10 seconds before giving up
     ready = IO.select([sock], nil, nil, timeout)
     raise Timeout::Error, "Timeout waiting for length header" unless ready
@@ -34,21 +34,22 @@ module utilities
   # helper method to ensure full_write
   def write_all(sock, data)
     total_written = 0
-
-    # tries to write as many bytes as possible and doesn't block the server
-    while total_written < data.bytesize
-      written = sock.write_nonblock(data[total_written..-1]
-      total_written += written
-    end
+    attempts = 0 
+    begin
+      # tries to write as many bytes as possible and doesn't block the server
+      while total_written < data.bytesize
+        written = sock.write_nonblock(data[total_written..-1]
+        total_written += written
+      end
 
     # in case of failure wait untill the socket is writable, 5 maximum attempts
     rescue IO::WaitWritable
+      attempts += 1
+      raise IOError, "Socket not writable after 5 attempts" if attempts >= 5
       ready = IO.select(nil, [sock], nil, 5)
-      if ready.nil?
-        raise IOError, "Socket not writable within timeout"
-      else
-        retry
-      end
+      retry if ready 
+      raise IOError, "Socket not writable within timeout"
+      
+    end
   end
-
 end

@@ -12,18 +12,19 @@ class SecureClient
   def send_message(msg)
     sock = TCPSocket.new(@host, @port)
 
-    # 1) Ephemeral client key
+    # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    # 2) Receive host pub, server eph pub, signature
-    host_pk = RbNaCl::VerifyKey.new(read_blob(sock))
-    server_eph_pk = read_blob(sock)
-    sig = read_blob(sock)
+    # Receive host pub, server eph pub, signature
+    host_pk = RbNaCl::VerifyKey.new(utils.read_blob(sock))
+    server_eph_pk = utils.read_blob(sock)
+    sig = utils.read_blob(sock)
 
     # Verify signature
     host_pk.verify(sig, server_eph_pk)
 
+    	
     server_eph_pk = RbNaCl::PublicKey.new(server_eph_pk)
 
     # 3) Shared secret
@@ -54,10 +55,6 @@ class SecureClient
     sock.close
   end
 
-  def read_blob(sock)
-    len = sock.read(4).unpack1("N")
-    sock.read(len)
-  end
 
   def send_blob(sock, data)
     sock.write([data.bytesize].pack("N") + data)

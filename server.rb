@@ -2,6 +2,7 @@ require 'socket'
 require 'rbnacl'
 require 'openssl'
 require 'securerandom'
+require_relative 'utils'
 
 # used for error handling
 class BlobSizeError < BlobReadError; end
@@ -15,46 +16,37 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
   # handles a single client 
   def handle_client(sock)
-    # 1) Ephemeral X25519 server key
+    # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    # 2) Sign ephemeral pub with host key, creates a signature
+    # Sign ephemeral pub with host key, creates a signature
     sig = @host_sk.sign(eph_pk.to_bytes)
 
-    # Send public signing key and ephemeral key 
+    # Send public signing key and ephemeral key (kex)
     send_keys(sock, @host_pk, eph_pk, sig)
     
-    # 3) Receive client ephemeral public key and stores it
-    client_eph_pk = read_blob(sock)
+    # Receive client ephemeral public key and stores it
+    client_eph_pk = utils.read_blob(sock)
 
     # validate client's ephimeral key
-    unless client_public_key_check(client_eph_pk)
-      raise "Invalid client public key"
-    end
+    raise "Invalid client public key" unless client_public_key_check(client_eph_pk)
 
     # call function to create the key materials
-    key_material = key_material_func(client_eph_pk)
-
     # obtain encription and mac keys from the key material
+    key_material = key_material_func(client_eph_pk)
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 
+    # Receive nonce, ciphertext, mac and check for proper size/content value
+    nonce = utils.read_blob(sock)
+    ciphertext = utils.read_blob(sock)
+    mac = utils.read_blob(sock)
+    check_nonce_ciph
 
-    # 5) Receive nonce, ciphertext, mac
-    nonce = read_blob(sock)
-    ciphertext = read_blob(sock)
-    mac = read_blob(sock)
-
-    # check if ciphertext has content
-    if ciphertext.nil? || ciphertext.empty?
-      raise "Invalid ciphertext: empty or nil"
-    end
-
-    # check mac size
-    if mac.nil? || mac.bytesize != 32
-      raise "Invalid MAC length: expected 32, got #{mac&.bytesize || 0}"
-    end
+    raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
+    raise "Invalid ciphertext: empty or nil" if ciphertext.nil? || ciphertext.empty?
+    raise "Invalid MAC length: expected 32, got #{mac&.bytesize || 0}" if mac.nil? || mac.bytesize != 32
 
     # Verify HMAC
     hmac = OpenSSL::HMAC.digest("SHA256", mac_key, nonce + ciphertext)
@@ -65,10 +57,15 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     end
 
     # Decrypt AES-CTR
+    # create a new cipher object
     cipher = OpenSSL::Cipher.new("aes-256-ctr")
+    # sets cipher to decryption mode
     cipher.decrypt
+    # set decryption key
     cipher.key = enc_key
-    cipher.iv  = nonce
+    # set initialization vector to nonce
+    cipher.iv = nonce
+    # obtain fully decrypted text
     plaintext = cipher.update(ciphertext) + cipher.final
 
     puts "Received: #{plaintext}"
@@ -79,7 +76,6 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
   # function to obtain the key_materials
   def key_material_func(client_eph_pk)
-
     # Shared secret derived from the server's private key (eph_sk) and 
     # the received client's pub key (clinet_eph_pk)
     shared_secret = eph_sk.exchange(client_eph_pk)
@@ -101,63 +97,23 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   end
 
 
-  # function used to handle incoming data, timeout and size are handled here
-  def read_blob(sock, MAX_BLOB_SIZE, timeout: 10)
-    # read header (4 bytes), waits 10 seconds before giving up
-    ready = IO.select([sock], nil, nil, timeout)
-    raise Timeout::Error, "Timeout waiting for length header" unless ready
-
-    # check header's size
-    header = sock.read(4)
-    raise EOFError, "Connection closed while reading length header" if header.nil? || header.bytesize < 4
-
-    # sanity check for payload length
-    blob_len = header.unpack1("N")  # unpack1 gives an integer directly
-    raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > max_blob_size
-
-    # read payload (exactly blob_len bytes) blob will contain the payload
-    # +"" creates a new mutable empty String (not frozen). 
-    blob = +""
-    while blob.bytesize < blob_len
-      ready = IO.select([sock], nil, nil, timeout)
-      raise Timeout::Error, "Timeout while reading blob" unless ready
-
-      chunk = sock.read(blob_len - blob.bytesize)
-      raise EOFError, "Connection closed while reading blob (expected #{blob_len}, got #{blob.bytesize})" if chunk.nil? || chunk.empty?
-
-      blob << chunk
-    end
-
-    blob
-  end
-  
-  
   # function to check the client_eph_pk (size, validity, non zeros)
   def client_public_key_check(raw_key)
-  len = raw_key.bytesize
+  len = raw_key&.bytesize
 
-    # X25519 public keys are always 32 bytes, guarantee size is correct
-    if len != RbNaCl::PublicKey::BYTES
-      raise "Invalid public key length: #{len}"
-    end
+  # X25519 public keys are always 32 bytes, guarantee size is correct
+  # guarantee key is actually a valid key and also non zeros
+  raise "Invalid public key length: #{len}" if len != RbNaCl::PublicKey::BYTES
+  raise "Failed to read full public key" if client_eph_pk.nil? || raw_key.bytesize != len
+  raise "Rejected all-zero public key" if raw_key == ("\x00" * 32)
 
-    # guarantee key is actually a valid key
-    if client_eph_pk.nil? || raw_key.bytesize != len
-      raise "Failed to read full public key"
-    end
-
-    # extra safety to avoid all zeroes public keys
-    if raw_key == ("\x00" * 32)
-      raise "Rejected all-zero public key"
-    end
-
-    # create an object with the received bytes (client's ephimeral public key)
-    # guarantees the key is a proper object and handled safely
-    begin
-      client_eph_pk = RbNaCl::PublicKey.new(raw_key)
-    rescue RbNaCl::LengthError => e
-      raise "Invalid public key: #{e.message}"
-    end
+  # create an object with the received bytes (client's ephimeral public key)
+  # guarantees the key is a proper object and handled safely
+  begin
+    client_eph_pk = RbNaCl::PublicKey.new(raw_key)
+  rescue RbNaCl::LengthError => e
+    raise "Invalid public key: #{e.message}"
+  end
 
   client_eph_pk
   end
@@ -177,22 +133,20 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
       [@host_pk, eph_pk].each do |key|
 
         # check if the keys have the method to_bytes
-        unless key.respond_to?(:to_bytes)
-          raise ArgumentError, "Invalid key object: #{key.inspect}"
-        end
+        raise ArgumentError, "Invalid key object: #{key.inspect}" unless key.respond_to?(:to_bytes)
 
       bytes = key.to_bytes
       length = [bytes.bytesize].pack("N")
-      write_all(sock, length + bytes)
+      utils.write_all(sock, length + bytes)
       end
 
     # send the signature of the ephemeral public key
     sig_length = [sig.bytesize].pack("N")
-    write_all(sock, sig_length + sig)
+    utils.write_all(sock, sig_length + sig)
 
     # rescue clause 
     rescue IOError, Errno::EPIPE => e
-      warn "Socket write failed: #{e.message}"
+      warn "Socket write failed: #{e.class} - #{e.message}"
       raise
     rescue StandardError => e
       warn "Unexpected error during send_keys: #{e.class} - #{e.message}"
@@ -200,37 +154,18 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     ensure 
       begin
 	sock.close if sock && !sock.closed?
-      rescue close_error
+      rescue => close_error
 	warn "Failed to close socket: #{close_error.class} - #{close_error.message}"
       end
     end
   end
 
 
-  # helper method to ensure full_write
-  def write_all(sock, data)
-    total_written = 0
-
-    # tries to write as many bytes as possible and doesn't block the server
-    while total_written < data.bytesize
-      written = sock.write_nonblock(data[total_written..-1]
-      total_written += written
-    end
-
-    # in case of failure wait untill the socket is writable, 5 maximum attempts
-    rescue IO::WaitWritable
-      ready = IO.select(nil, [sock], nil, 5)
-      if ready.nil?
-	raise IOError, "Socket not writable within timeout"
-      else
-        retry
-      end
-  end
-
-
   # create a Ed25519 private key (signing key)
   # used to sign the server's ephimeral public key
   # @host_pk contains the derived public key
+  # !!!!!!!! this part has to be changed for proper host key handling !!!!!!!!
+  # !!!!!!!! TO FIX !!!!!!!!!
   def initialize(port)
     @port = port
 
@@ -243,7 +178,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   # handles the incoming connections 
   # spawns a new thread for each new client connection
   def run
-    TCPServer.open(@port) do |server|
+    server = TCPServer.open(@port)
       puts "Server listening on port #{@port}"
       loop do
         client = server.accept
@@ -263,7 +198,8 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 	  end
 	end
       end
-    end
+  ensure
+    server.close if server
   end
 
 

@@ -1,6 +1,8 @@
 # reading and writing functions
 # as well as checks
-module utils
+module Utils
+
+MAX_BLOB_SIZE = 16 * 1024 * 1024
 
   # function to receive public key, ephimeral key and signature
   def receive_and_check()
@@ -15,7 +17,7 @@ module utils
 
 
   # function to obtain the full content of the socket
-  def read_blob(sock, MAX_BLOB_SIZE = 16 * 1024 * 1024, timeout: 10)
+  def read_blob(sock, timeout: 10)
     # read header (4 bytes), waits 10 seconds before giving up
     ready = IO.select([sock], nil, nil, timeout)
     raise Timeout::Error, "Timeout waiting for length header" unless ready
@@ -26,7 +28,7 @@ module utils
 
     # sanity check for payload length
     blob_len = header.unpack1("N")  # unpack1 gives an integer directly
-    raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > max_blob_size
+    raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > MAX_BLOB_SIZE
 
     # read payload (exactly blob_len bytes) blob will contain the payload
     # +"" creates a new mutable empty String (not frozen). 
@@ -52,7 +54,7 @@ module utils
     begin
       # tries to write as many bytes as possible and doesn't block the server
       while total_written < data.bytesize
-        written = sock.write_nonblock(data[total_written..-1]
+        written = sock.write_nonblock(data[total_written..-1])
         total_written += written
       end
 
@@ -90,7 +92,7 @@ module utils
   end
 
   # this function is used to send the public and ephemeral keys as well as the signature 
-  def send_kex(sock, @host_pk, eph_pk, sig, salt)
+  def send_kex(sock, host_pk, eph_pk, sig, salt)
 
     # input validation
     raise ArgumentError, "Socket is nil" if sock.nil?
@@ -101,7 +103,7 @@ module utils
     # send pub key and ephemeral key
     # !!! possibly make it shorter inserting sig and salt in the block
     begin
-      [@host_pk, eph_pk].each do |key|
+      [host_pk, eph_pk].each do |key|
 
         # check if the keys have the method to_bytes
         raise ArgumentError, "Invalid key object: #{key.inspect}" unless key.respond_to?(:to_bytes)

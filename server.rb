@@ -4,6 +4,9 @@ require 'openssl'
 require 'securerandom'
 require 'concurrent-ruby'
 require_relative 'utils'
+require 'pry'
+require 'pry-byebug'
+
 
 # used for error handling
 class BlobReadError < StandardError; end
@@ -25,23 +28,23 @@ class SecureServer
     session_salt = SecureRandom.random_bytes(16)
 
     # Send public signing key and ephemeral key (kex)
-    utils.send_kex(sock, @host_pk, eph_pk, sig, session_salt)
+    Utils.send_kex(sock, @host_pk, eph_pk, sig, session_salt)
     
     # Receive host pub, server eph pub, signature
-    keys = utils.receive_and_check()
+    keys = Utils.receive_and_check()
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]
 
     # call function to create the key materials
     # obtain encription and mac keys from the key material
-    key_material = utils.key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
+    key_material = Utils.key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 
     # Receive nonce, ciphertext, mac and check for proper size/content value
-    nonce = utils.read_blob(sock)
-    ciphertext = utils.read_blob(sock)
-    mac = utils.read_blob(sock)
+    nonce = Utils.read_blob(sock)
+    ciphertext = Utils.read_blob(sock)
+    mac = Utils.read_blob(sock)
     check_nonce_ciph
 
     raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
@@ -73,6 +76,7 @@ class SecureServer
     sock.close
   end
 
+				
 
   # create a Ed25519 private key (signing key)
   # used to sign the server's ephimeral public key
@@ -80,6 +84,7 @@ class SecureServer
   # !!!!!!!! this part has to be changed for proper host key handling !!!!!!!!
   # !!!!!!!! TO FIX !!!!!!!!!
   def initialize(port)
+  binding.pry
     # ip port and max number of threads
     @port = port
     @pool = Concurrent::FixedThreadPool.new(20)
@@ -93,32 +98,33 @@ class SecureServer
   # handles the incoming connections 
   # spawns a new thread for each new client connection
   def run
-  begin
-  server = TCPServer.new(@port)
-  puts "Server listening on port #{@port}"
+    begin
+    server = TCPServer.new(@port)
+    puts "Server listening on port #{@port}"
 
-    loop do
-      # client is the tcp connection 
-      client = server.accept
+      loop do
+        # client is the tcp connection 
+        client = server.accept
 
-      # Submit the client handling job to the pool
-      @pool.post do
-        begin
-          handle_client(client)
-        rescue StandardError => e
+        # Submit the client handling job to the pool
+        @pool.post do
           begin
-            client.write "connection failed: #{e.message}"
-          rescue => send_error
-            puts "failed to send error to the client: #{send_error.message}"
+            self.handle_client(client)
+          rescue StandardError => e
+            begin
+              client.write "connection failed: #{e.message}"
+            rescue => send_error
+              puts "failed to send error to the client: #{send_error.message}"
+            end
+            puts "Thread exception #{e.class} - #{e.message}"
+          ensure
+            client.close
           end
-          puts "Thread exception #{e.class} - #{e.message}"
-        ensure
-          client.close
         end
       end
+    ensure
+      self.shutdown(server) if server
     end
-  ensure
-    self.shutdown(server) if server
   end
 
   def shutdown(server)
@@ -152,6 +158,7 @@ class SecureServer
       exit
     end
   end
+
 end
 
 # non necessariamente instanziabile

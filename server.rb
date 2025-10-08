@@ -2,6 +2,7 @@ require 'socket'
 require 'rbnacl'
 require 'openssl'
 require 'securerandom'
+require 'concurrent-ruby'
 require_relative 'utils'
 
 # used for error handling
@@ -33,7 +34,7 @@ class SecureServer
 
     # call function to create the key materials
     # obtain encription and mac keys from the key material
-    key_material = utils.key_material_func(eph_sk, eph_pk, client_eph_pk, salt)
+    key_material = utils.key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 
@@ -79,7 +80,9 @@ class SecureServer
   # !!!!!!!! this part has to be changed for proper host key handling !!!!!!!!
   # !!!!!!!! TO FIX !!!!!!!!!
   def initialize(port)
+    # ip port and max number of threads
     @port = port
+    @pool = Concurrent::FixedThreadPool.new(20)
 
     # Long-term host key (Ed25519)
     @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
@@ -90,31 +93,67 @@ class SecureServer
   # handles the incoming connections 
   # spawns a new thread for each new client connection
   def run
-    server = TCPServer.open(@port)
-      puts "Server listening on port #{@port}"
-      loop do
-        client = server.accept
-        Thread.new(client) do |c|
-	  begin
-	    handle_client(c)
-	  rescue StandardError => e 
-	    # send error message to che client
-	    begin
-	      c.write "connection failed: #{e.message}"
-	    rescue send_error
-	      puts "failed to send error to the client: #{send_error.message}"
-	    end
-	    puts "Thread exception #{e.class} - #{e.message}"
-	  ensure
-	    c.close 
-	  end
-	end
+  begin
+  server = TCPServer.new(@port)
+  puts "Server listening on port #{@port}"
+
+    loop do
+      # client is the tcp connection 
+      client = server.accept
+
+      # Submit the client handling job to the pool
+      @pool.post do
+        begin
+          handle_client(client)
+        rescue StandardError => e
+          begin
+            client.write "connection failed: #{e.message}"
+          rescue => send_error
+            puts "failed to send error to the client: #{send_error.message}"
+          end
+          puts "Thread exception #{e.class} - #{e.message}"
+        ensure
+          client.close
+        end
       end
+    end
   ensure
-    server.close if server
+    self.shutdown(server) if server
   end
 
+  def shutdown(server)
+    begin
+      puts "\nShutting down server..."
 
+      # Try to close the TCP server socket
+      begin
+        server.close
+        puts "Server socket closed."
+      rescue => e
+        puts "Warning: failed to close server socket - #{e.class}: #{e.message}"
+      end
+
+      # Try to shut down the thread pool gracefully
+      begin
+        @pool.shutdown
+        @pool.wait_for_termination
+        puts "Thread pool shut down cleanly."
+      rescue => e
+        puts "Warning: thread pool shutdown failed - #{e.class}: #{e.message}"
+      end
+
+      puts "Server stopped gracefully."
+
+    rescue => e
+      # This catches *any* error during shutdown
+      puts "Unexpected error during shutdown: #{e.class} - #{e.message}"
+    ensure
+      # Always exit even if errors occurred
+      exit
+    end
+  end
 end
 
+# non necessariamente instanziabile
 SecureServer.new(2222).run
+

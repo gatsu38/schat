@@ -99,6 +99,7 @@ module utils
     raise ArgumentError, "Signature is nil" if sig.nil?
 
     # send pub key and ephemeral key
+    # !!! possibly make it shorter inserting sig and salt in the block
     begin
       [@host_pk, eph_pk].each do |key|
 
@@ -138,7 +139,7 @@ module utils
   def handshake_check(pb_key, eph_key, sig, salt)
     begin
       # 1. Validate and construct server public key
-      pk = RbNaCl::VerifyKey.new(pb_key)
+      pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(pb_key)
     rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
       raise "Invalid server public key: #{e.message}"
     end
@@ -180,10 +181,7 @@ module utils
     shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk).key
 
     # Let's make sure the derived shared key is safe (non zeros)
-    if shared_secret == ("\x00" * 32)
-      raise "Invalid or unsafe shared secret (all-zero) — abort"
-    end
-
+    raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
 
     # make info include the transcript to bind the keys
     transcript = "ssh-like" + local_eph_pk + remote_eph_pk

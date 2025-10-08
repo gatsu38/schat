@@ -1,6 +1,8 @@
 	TCP connection
 Client => => => => => server
 
-	KEX server pub key, ephemeral key, signature
+	send_kex server pub key, ephemeral key, signature
 server => => => => => => => => => => => => => => => client
 	
+client =>  receive_and_check => handshake_check
+

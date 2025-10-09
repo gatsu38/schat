@@ -5,11 +5,15 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 
   # function to receive public key, ephimeral key and signature
-  def receive_and_check()
-    public_key = utils.read_blob(sock)
-    ephemeral_key = utils.read_blob(sock)
-    signature = utils.read_blob(sock)
-    salt = utils.read_blob(sock)
+  def receive_and_check(sock)
+    public_key = read_blob(sock)
+    puts "public_key received"
+    ephemeral_key = read_blob(sock)
+    puts "ephemeral_key received"
+    signature = read_blob(sock)
+    puts "signature received"
+    salt = read_blob(sock)
+    puts "salt received"
 
     # validate server's public_key, ephimeral key, signature and salt
     result = handshake_check(public_key, ephemeral_key, signature, salt)
@@ -17,7 +21,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
 
   # function to obtain the full content of the socket
-  def read_blob(sock, timeout: 10)
+  def read_blob(sock, timeout: 1000)
     # read header (4 bytes), waits 10 seconds before giving up
     ready = IO.select([sock], nil, nil, timeout)
     raise Timeout::Error, "Timeout waiting for length header" unless ready
@@ -110,15 +114,15 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
       bytes = key.to_bytes
       length = [bytes.bytesize].pack("N")
-      utils.write_all(sock, length + bytes)
+      write_all(sock, length + bytes)
       end
 
     # send the signature of the ephemeral public key
     sig_length = [sig.bytesize].pack("N")
-    utils.write_all(sock, sig_length + sig)
+    write_all(sock, sig_length + sig)
 
     salt_length = [salt.bytesize].pack("N")
-    utils.write_all(sock, salt_length + salt)
+    write_all(sock, salt_length + salt)
 
     # rescue clause 
     rescue IOError, Errno::EPIPE => e

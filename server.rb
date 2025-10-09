@@ -14,9 +14,11 @@ class BlobSizeError < BlobReadError; end
 
 # === Server ===
 class SecureServer
+  include Utils
 
   # handles a single client 
   def handle_client(sock)
+    puts "handle client"
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
@@ -27,24 +29,29 @@ class SecureServer
     # create a salt for the session
     session_salt = SecureRandom.random_bytes(16)
 
+    puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
-    Utils.send_kex(sock, @host_pk, eph_pk, sig, session_salt)
-    
+
+    binding.pry
+    send_kex(sock, @host_pk, eph_pk, sig, session_salt)
+
     # Receive host pub, server eph pub, signature
-    keys = Utils.receive_and_check()
+    puts "start kex receiving"
+    keys = receive_and_check(sock)
+    puts "kex received"
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]
 
     # call function to create the key materials
     # obtain encription and mac keys from the key material
-    key_material = Utils.key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
+    key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 
     # Receive nonce, ciphertext, mac and check for proper size/content value
-    nonce = Utils.read_blob(sock)
-    ciphertext = Utils.read_blob(sock)
-    mac = Utils.read_blob(sock)
+    nonce = read_blob(sock)
+    ciphertext = read_blob(sock)
+    mac = read_blob(sock)
     check_nonce_ciph
 
     raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
@@ -84,7 +91,6 @@ class SecureServer
   # !!!!!!!! this part has to be changed for proper host key handling !!!!!!!!
   # !!!!!!!! TO FIX !!!!!!!!!
   def initialize(port)
-  binding.pry
     # ip port and max number of threads
     @port = port
     @pool = Concurrent::FixedThreadPool.new(20)
@@ -104,10 +110,12 @@ class SecureServer
 
       loop do
         # client is the tcp connection 
+        puts "ready to accept new connection"
         client = server.accept
-
+        puts "new connection accepted"
         # Submit the client handling job to the pool
         @pool.post do
+        puts "New thread opened"
           begin
             self.handle_client(client)
           rescue StandardError => e

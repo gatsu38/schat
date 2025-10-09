@@ -3,8 +3,13 @@ require 'rbnacl'
 require 'openssl'
 require 'securerandom'
 require_relative 'utils'
+require 'pry'
+require 'pry-byebug'
+
 
 class SecureClient
+  include Utils
+
   def initialize(host, port)
     @host, @port = host, port
 
@@ -16,6 +21,7 @@ class SecureClient
     
     # establish a connection with the server
     sock = TCPSocket.new(@host, @port)
+    puts "TCP connection established"
 
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
@@ -25,18 +31,23 @@ class SecureClient
     sig = @client_sk.sign(eph_pk.to_bytes)
 
     # obtain and validate keys
-    keys = utils.receive_and_check()
+    puts "obtain kex"
+    keys = receive_and_check(sock)
 
     # Receive server's public key, ephemeral public key and signature
     server_pk = keys[:public_key]
     server_eph_pk = keys[:ephemeral_key]
     salt = keys[:salt]
+    puts "kex received"
 
     # Send public signing key and ephemeral key (kex)
-    utils.send_kex(sock, @host_pk, eph_pk, sig, salt = nil)
-
+    puts "sending kex"
+    binding.pry
+    send_kex(sock, @client_pk, eph_pk, sig, salt)
+    puts "kex sent"
+    binding.pry
     # 4) Derive keys
-    key_material = utils.key_material_func(eph_sk, eph_pk, server_eph_pk, salt) 
+    key_material = key_material_func(eph_sk, eph_pk, server_eph_pk, salt) 
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]
 

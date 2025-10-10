@@ -4,24 +4,54 @@ module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 
+  def confirm_kex_arrived(sock)
+    confirmation = read_blob(sock)
+      if confirmation
+        puts "Kex sent and received"
+        return true
+      else
+        puts "Kex receival non confirmed"  
+        raise "Kex receival non confirmed"
+      end
+    
+  end
+
+  def confirm_kex_received(sock, conf)
+    write_all(sock, conf)
+  end
+
   # function to receive public key, ephimeral key and signature
   def receive_and_check(sock)
-    public_key = read_blob(sock)
-    puts "public_key received"
-    ephemeral_key = read_blob(sock)
-    puts "ephemeral_key received"
-    signature = read_blob(sock)
-    puts "signature received"
-    salt = read_blob(sock)
-    puts "salt received"
+    begin   
+      public_key = read_blob(sock)
+      puts "public_key received"
+      ephemeral_key = read_blob(sock)
+      puts "ephemeral_key received"
+      signature = read_blob(sock)
+      puts "signature received"
+      salt = read_blob(sock)
+      puts "salt received"
 
-    # validate server's public_key, ephimeral key, signature and salt
-    result = handshake_check(public_key, ephemeral_key, signature, salt)
+      # validate server's public_key, ephimeral key, signature and salt
+      result = handshake_check(public_key, ephemeral_key, signature, salt)
+     
+      # confirm to the server succesful kex transfer 
+      if
+        result confirm_kex_received(sock, true)
+      end
+
+    # tell peer an error occurred during the kex transfer
+    rescue => e
+      puts "Handshake failed"
+      confirm_kex_received(sock, false)
+      sock.close
+      exit
+    end
   end 
 
 
   # function to obtain the full content of the socket
-  def read_blob(sock, timeout: 1000)
+  def read_blob(sock, timeout: 10)
     # read header (4 bytes), waits 10 seconds before giving up
     ready = IO.select([sock], nil, nil, timeout)
     raise Timeout::Error, "Timeout waiting for length header" unless ready
@@ -65,7 +95,10 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     # in case of failure wait untill the socket is writable, 5 maximum attempts
     rescue IO::WaitWritable
       attempts += 1
-      raise IOError, "Socket not writable after 5 attempts" if attempts >= 5
+        if attempts >= 5
+          sock.close
+          abort IOError, "Socket not writable after 5 attempts. Sock closed. Schat closed" 
+        end  
       ready = IO.select(nil, [sock], nil, 5)
       retry if ready 
       raise IOError, "Socket not writable within timeout"
@@ -131,12 +164,6 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     rescue StandardError => e
       warn "Unexpected error during send_keys: #{e.class} - #{e.message}"
       raise
-    ensure
-      begin
-        sock.close if sock && !sock.closed?
-      rescue => close_error
-        warn "Failed to close socket: #{close_error.class} - #{close_error.message}"
-      end
     end
   end
 
@@ -175,6 +202,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     rescue => e
       raise "Salt verification failed: #{e.message}"
     end
+
     
     { public_key: pk, ephemeral_key: eph_pk, sig: sig, salt: salt }
   end

@@ -32,6 +32,7 @@ class SecureClient
 
     # obtain and validate keys
     puts "obtain kex"
+    binding.pry
     keys = receive_and_check(sock)
 
     # Receive server's public key, ephemeral public key and signature
@@ -42,10 +43,11 @@ class SecureClient
 
     # Send public signing key and ephemeral key (kex)
     puts "sending kex"
-    binding.pry
     send_kex(sock, @client_pk, eph_pk, sig, salt)
+    # confirm kex has been sent
+    confirm_kex_arrived(sock)
+    
     puts "kex sent"
-    binding.pry
     # 4) Derive keys
     key_material = key_material_func(eph_sk, eph_pk, server_eph_pk, salt) 
     enc_key = key_material[0,32]

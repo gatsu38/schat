@@ -31,13 +31,18 @@ class SecureServer
 
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
-
     binding.pry
     send_kex(sock, @host_pk, eph_pk, sig, session_salt)
+    # confirm kex has been sent
+    confirm_kex_arrived(sock)
 
     # Receive host pub, server eph pub, signature
     puts "start kex receiving"
     keys = receive_and_check(sock)
+
+    
+    # kex_confirmation_sender(sock)
+    
     puts "kex received"
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]

@@ -1,5 +1,3 @@
-!!!! FIX LINE 136 utils.rb
-
 increment counters for every BlobTimeoutError/BlobEOFError. That lets you detect attacks or flakey clients.
 add ensure to tell client the server raised an error during payload transfer
 add nonce check 

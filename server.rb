@@ -31,22 +31,20 @@ class SecureServer
 
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
-    binding.pry
     send_kex(sock, @host_pk, eph_pk, sig, session_salt)
     # confirm kex has been sent
-    confirm_kex_arrived(sock)
+    # confirm_kex_arrived(sock, sig)
 
     # Receive host pub, server eph pub, signature
     puts "start kex receiving"
     keys = receive_and_check(sock)
 
-    
     # kex_confirmation_sender(sock)
     
     puts "kex received"
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]
-
+    client_sig = keys[:sig]
     # call function to create the key materials
     # obtain encription and mac keys from the key material
     key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
@@ -130,8 +128,13 @@ class SecureServer
               puts "failed to send error to the client: #{send_error.message}"
             end
             puts "Thread exception #{e.class} - #{e.message}"
+            puts e.backtrace.join("\n")
           ensure
-            client.close
+            begin
+              client.close
+            rescue StandardError => close_error
+              puts "Failed to close the client: #{close_error.message}"
+            end  
           end
         end
       end

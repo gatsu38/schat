@@ -1,88 +1,113 @@
 # reading and writing functions
 # as well as checks
+
+require 'timeout'
+require 'rbnacl'
 module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 
-  def confirm_kex_arrived(sock)
+  def confirm_kex_arrived(sock, digest)
+    binding.pry
     confirmation = read_blob(sock)
-      if confirmation
+    binding.pry
+      if confirmation == digest
+      
         puts "Kex sent and received"
         return true
       else
         puts "Kex receival non confirmed"  
         raise "Kex receival non confirmed"
-      end
-    
-  end
-
-  def confirm_kex_received(sock, conf)
-    write_all(sock, conf)
+      end    
   end
 
   # function to receive public key, ephimeral key and signature
   def receive_and_check(sock)
-    begin   
-      public_key = read_blob(sock)
-      puts "public_key received"
-      ephemeral_key = read_blob(sock)
-      puts "ephemeral_key received"
-      signature = read_blob(sock)
-      puts "signature received"
-      salt = read_blob(sock)
-      puts "salt received"
+    raise ArgumentError, "Socket is nil" if sock.nil?
+    
+    returned_blob = read_blob(sock)
 
-      # validate server's public_key, ephimeral key, signature and salt
-      result = handshake_check(public_key, ephemeral_key, signature, salt)
-     
-      # confirm to the server succesful kex transfer 
-      if
-        result confirm_kex_received(sock, true)
-      end
+    # send back hash of blob
+    binding.pry
+    blob_confirmation(sock, returned_blob)
 
-    # tell peer an error occurred during the kex transfer
-    rescue => e
-      puts "Handshake failed"
-      confirm_kex_received(sock, false)
-      sock.close
-      exit
-    end
+    
+    rescue IOError, Errno::EPIPE => e
+      warn "Socket read failed: #{e.class} - #{e.message}"
+      raise
+    rescue StandardError => e
+      warn "Unexpected error during read_kex: #{e.class} - #{e.message}"
+      raise  
   end 
+
+  def kex_assigner
+    
+  end
+
+  def blob_confirmation(sock, blob)
+    digest = RbNaCl::Hash.sha256(blob)
+    write_all(sock, digest)    
+  end
 
 
   # function to obtain the full content of the socket
-  def read_blob(sock, timeout: 10)
-    # read header (4 bytes), waits 10 seconds before giving up
-    ready = IO.select([sock], nil, nil, timeout)
-    raise Timeout::Error, "Timeout waiting for length header" unless ready
+  def read_blob(sock, timeout: 10, max_attempts:5)
+    attempts = 0
 
-    # check header's size
-    header = sock.read(4)
-    raise EOFError, "Connection closed while reading length header" if header.nil? || header.bytesize < 4
-
-    # sanity check for payload length
-    blob_len = header.unpack1("N")  # unpack1 gives an integer directly
-    raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > MAX_BLOB_SIZE
-
-    # read payload (exactly blob_len bytes) blob will contain the payload
-    # +"" creates a new mutable empty String (not frozen). 
-    blob = +""
-    while blob.bytesize < blob_len
+    begin
+      attempts += 1
+      # read header (4 bytes), waits 10 seconds before giving up
       ready = IO.select([sock], nil, nil, timeout)
-      raise Timeout::Error, "Timeout while reading blob" unless ready
+      raise Timeout::Error, "Timeout waiting for length header" unless ready
 
-      chunk = sock.read(blob_len - blob.bytesize)
-      raise EOFError, "Connection closed while reading blob (expected #{blob_len}, got #{blob.bytesize})" if chunk.nil? || chunk.empty?
+      # check header's size
+      header = sock.read(4)
+      raise EOFError, "Connection closed while reading length header" if header.nil? || header.bytesize < 4
 
-      blob << chunk
+      # sanity check for payload length
+      blob_len = header.unpack1("N")  # unpack1 gives an integer directly
+      raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > MAX_BLOB_SIZE
+
+      # read payload (exactly blob_len bytes) blob will contain the payload
+      # +"" creates a new mutable empty String (not frozen). 
+      blob = +""
+      while blob.bytesize < blob_len
+        ready = IO.select([sock], nil, nil, timeout)
+        raise Timeout::Error, "Timeout while reading blob" unless ready
+
+        chunk = sock.read(blob_len - blob.bytesize)
+        raise EOFError, "Connection closed while reading blob (expected #{blob_len}, got #{blob.bytesize})" if chunk.nil? || chunk.empty?
+
+        blob << chunk
+      end
+
+      # make sure the full kex has been sent with the exact size
+      unless header.unpack1("N") == blob.size
+        raise IOError, "KEX length mismatch: expected size: #{header.unpack1("N")}, obtained: #{blob.size}"
+      end
+
+      blob
+
+    rescue Timeout::Error, EOFError, BlobSizeError => e
+      if attempts < max_attempts
+        puts "Attempt #{attempts} failed: #{e.message}. Retrying..."
+        retry
+      else
+        puts "All #{max_attempts} attempts failed."
+        raise
+      end
     end
-
-    blob
   end
 
 
   # helper method to ensure full_write on the remote socket
-  def write_all(sock, data)
+  def write_all(sock, payload)
+
+    # prefix the payload with the whole size of the payload
+    total_length = payload.bytesize
+    header = [total_length].pack("N")
+    data = header + payload
+  
     total_written = 0
     attempts = 0 
     begin
@@ -129,33 +154,28 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   end
 
   # this function is used to send the public and ephemeral keys as well as the signature 
-  def send_kex(sock, host_pk, eph_pk, sig, salt)
+  def send_kex(sock, *blobs)
 
-    # input validation
+    # check sock not nil
     raise ArgumentError, "Socket is nil" if sock.nil?
-    raise ArgumentError, "Host public key is nil" if host_pk.nil?
-    raise ArgumentError, "Ephemeral public key is nil" if eph_pk.nil?
-    raise ArgumentError, "Signature is nil" if sig.nil?
-
-    # send pub key and ephemeral key
-    # !!! possibly make it shorter inserting sig and salt in the block
     begin
-      [host_pk, eph_pk].each do |key|
 
-        # check if the keys have the method to_bytes
-        raise ArgumentError, "Invalid key object: #{key.inspect}" unless key.respond_to?(:to_bytes)
+      # check blob content not nil
+      raise ArgumentError, "Kex argument missing" if blobs.nil?
 
-      bytes = key.to_bytes
-      length = [bytes.bytesize].pack("N")
-      write_all(sock, length + bytes)
-      end
+      # build a big payload made of all the content needed for kex
+      payload = blobs.flat_map do |blob|
+        data = blob.respond_to?(:to_bytes) ? blob.to_bytes : blob
+        [ [data.bytesize].pack("N"), data]
+      end.join
 
-    # send the signature of the ephemeral public key
-    sig_length = [sig.bytesize].pack("N")
-    write_all(sock, sig_length + sig)
+      # create a digest of the whole payload less the total size header
+      digest = RbNaCl::Hash.sha256(payload)
 
-    salt_length = [salt.bytesize].pack("N")
-    write_all(sock, salt_length + salt)
+      # send the full_payload        
+      write_all(sock, payload)
+      confirm_kex_arrived(sock, digest)
+      
 
     # rescue clause 
     rescue IOError, Errno::EPIPE => e

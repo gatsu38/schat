@@ -19,10 +19,6 @@ class SecureClient
 
   def send_message(msg)
     
-    # establish a connection with the server
-    sock = TCPSocket.new(@host, @port)
-    puts "TCP connection established"
-
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
@@ -30,22 +26,29 @@ class SecureClient
     # Sign ephemeral pub with host key, creates a signature
     sig = @client_sk.sign(eph_pk.to_bytes)
 
+    puts "created: ephemeral private key, public key and signature"
+
+    # establish a connection with the server
+    sock = TCPSocket.new(@host, @port)
+    puts "TCP connection established"
+
     # obtain and validate keys
     puts "obtain kex"
-    binding.pry
-    keys = receive_and_check(sock)
-
+    blob = receive_and_check(sock)
+   
     # Receive server's public key, ephemeral public key and signature
+    keys = assigner(blob)
     server_pk = keys[:public_key]
     server_eph_pk = keys[:ephemeral_key]
     salt = keys[:salt]
+    server_sig = keys[:sig]
     puts "kex received"
 
     # Send public signing key and ephemeral key (kex)
     puts "sending kex"
     send_kex(sock, @client_pk, eph_pk, sig, salt)
     # confirm kex has been sent
-    confirm_kex_arrived(sock)
+    # confirm_kex_arrived(sock, server_sig)
     
     puts "kex sent"
     # 4) Derive keys

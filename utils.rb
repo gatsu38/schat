@@ -7,17 +7,6 @@ module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 
-  def confirm_kex_arrived(sock, digest)
-    confirmation = read_blob(sock)
-      if confirmation == digest
-      
-        puts "Kex sent and received"
-        return true
-      else
-        puts "Kex receival non confirmed"  
-        raise "Kex receival non confirmed"
-      end    
-  end
 
   # function to receive public key, ephimeral key and signature
   def receive_and_check(sock)
@@ -28,18 +17,27 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     # send back hash of blob
     blob_confirmation(sock, returned_blob)
 
-    # 
+    # parse the blob into 4 different contents 
     keys = kex_parser(returned_blob)
     rescue IOError, Errno::EPIPE => e
-      warn "Socket read failed: #{e.class} - #{e.message}"
+      warn "Socket read failed: #{e.class} - #e.message}"
       raise
     rescue StandardError => e
       warn "Unexpected error during read_kex: #{e.class} - #{e.message}"
       raise  
   end 
 
+
+  # send back a hash of the blob (kex) to confirm arrival of kex
+  def blob_confirmation(sock, blob)
+    digest = RbNaCl::Hash.sha256(blob)
+    write_all(sock, digest)
+  end
+  
+
+  # parse the blob to obtain the kex
   def kex_parser(blob)
-    # keys = [:public_key, :ephemeral_key, :sig, :salt]
+    # keys = [:public_key, :ephemeral_pub_key, :sig, :salt]
     result = []
     pos = 0 
     4.times do 
@@ -52,10 +50,95 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     kex = handshake_check(result[0], result[1], result[2], result[3]) 
   end
 
-  def blob_confirmation(sock, blob)
-    digest = RbNaCl::Hash.sha256(blob)
-    write_all(sock, digest)    
+
+  # function to check the validity of the keys and signature
+  def handshake_check(pb_key, eph_key, sig, nonce)
+    begin
+      # 1. Validate and construct server public key
+      pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(pb_key)
+      #pk = OpenSSL::PKey::Ed25519.new(pb_key)
+    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
+      raise "Invalid server public key: #{e.message}"
+    end
+
+    begin
+      # 2. Validate and construct ephemeral public key
+      eph_pk = RbNaCl::PublicKey.new(eph_key)
+      #eph_pk = OpenSSL::PKey::X25519.new(eph_key)
+    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
+      raise "Invalid server ephemeral public key: #{e.message}"
+    end
+
+    begin
+      # 3. Verify signature (server proves it owns the public key)
+      # The signature must be valid for eph_pk using the remote pk      
+      pk.verify(sig, eph_pk.to_bytes)
+    rescue RbNaCl::BadSignatureError
+      raise "Invalid signature: does not match the server public key"
+    end
+
+    begin
+      # check the nonce's validity
+      raise "Missing nonce" if nonce.nil?
+      raise "Invalid nonce length: #{nonce.bytesize}" unless nonce.bytesize == 24
+      raise "Nonce is all zeros" if nonce == ("\x00" * 24)
+      raise "Low-entropy nonce (repeated byte)" if nonce.each_byte.uniq.length == 1
+
+    rescue => e
+      raise "Nonce verification failed: #{e.message}"
+    end
+
+    { public_key: pk, ephemeral_key: eph_pk, sig: sig, nonce: nonce }
   end
+
+
+  # this function is used to send the public and ephemeral keys as well as the signature 
+  def send_kex(sock, *blobs)
+
+    # check sock not nil
+    raise ArgumentError, "Socket is nil" if sock.nil?
+    begin
+
+      # check blob content not nil
+      raise ArgumentError, "Kex argument missing" if blobs.nil?
+
+      # build a big payload made of all the content needed for kex
+      payload = blobs.flat_map do |blob|
+        data = blob.respond_to?(:to_bytes) ? blob.to_bytes : blob
+        [ [data.bytesize].pack("N"), data]
+      end.join
+
+      # create a digest of the whole payload less the total size header
+      digest = RbNaCl::Hash.sha256(payload)
+
+      # send the full_payload        
+      write_all(sock, payload)
+      confirm_kex_arrived(sock, digest)
+
+
+    # rescue clause 
+    rescue IOError, Errno::EPIPE => e
+      warn "Socket write failed: #{e.class} - #{e.message}"
+      raise
+    rescue StandardError => e
+      warn "Unexpected error during send_keys: #{e.class} - #{e.message}"
+      raise
+    end
+  end
+
+  # obtain a hash of the blob (kex) and confirm it arrived
+  def confirm_kex_arrived(sock, digest)
+    confirmation = read_blob(sock)
+      if confirmation == digest
+
+        puts "Kex sent and received"
+        return true
+      else
+        puts "Kex receival non confirmed"
+        raise "Kex receival non confirmed"
+      end
+  end
+ 
 
 
   # function to obtain the full content of the socket
@@ -140,6 +223,24 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   end
 
 
+  # function to obtain the key_materials
+  def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
+    # Shared secret derived from the server's private key (eph_sk) and 
+    # the received client's ephemeral pub key (remote_eph_pk)
+    # shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk)
+    shared_secret = local_eph_sk.derive(remote_eph_pk)
+
+    # Let's make sure the derived shared key is safe (non zeros)
+    raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
+
+    # make info include the transcript to bind the keys
+    transcript = "ssh-like" + local_eph_pk + remote_eph_pk
+
+    # 4) Derive keys, first create a 64 bytes long key material (km) then split it in half
+    # obtain so the encription key and the mac_key 
+    km = OpenSSL::KDF.hkdf(shared_secret, salt: salt, info: transcript, length: 64, hash: "SHA256")
+  end
+
   # function to check the client_eph_pk (size, validity, non zeros)
   def key_format_check(raw_key)
   len = raw_key&.bytesize
@@ -161,97 +262,6 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   client_eph_pk
   end
 
-  # this function is used to send the public and ephemeral keys as well as the signature 
-  def send_kex(sock, *blobs)
-
-    # check sock not nil
-    raise ArgumentError, "Socket is nil" if sock.nil?
-    begin
-
-      # check blob content not nil
-      raise ArgumentError, "Kex argument missing" if blobs.nil?
-
-      # build a big payload made of all the content needed for kex
-      payload = blobs.flat_map do |blob|
-        data = blob.respond_to?(:to_bytes) ? blob.to_bytes : blob
-        [ [data.bytesize].pack("N"), data]
-      end.join
-
-      # create a digest of the whole payload less the total size header
-      digest = RbNaCl::Hash.sha256(payload)
-
-      # send the full_payload        
-      write_all(sock, payload)
-      confirm_kex_arrived(sock, digest)
-      
-
-    # rescue clause 
-    rescue IOError, Errno::EPIPE => e
-      warn "Socket write failed: #{e.class} - #{e.message}"
-      raise
-    rescue StandardError => e
-      warn "Unexpected error during send_keys: #{e.class} - #{e.message}"
-      raise
-    end
-  end
-
-
-  # function to check the validity of the keys and signature
-  def handshake_check(pb_key, eph_key, sig, salt)
-    begin
-      # 1. Validate and construct server public key
-      pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(pb_key)
-    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
-      raise "Invalid server public key: #{e.message}"
-    end
-
-    begin
-      # 2. Validate and construct ephemeral public key
-      eph_pk = RbNaCl::PublicKey.new(eph_key)
-    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
-      raise "Invalid server ephemeral public key: #{e.message}"
-    end
-
-    begin
-      # 3. Verify signature (server proves it owns the public key)
-      # The signature must be valid for eph_pk.to_bytes using server_pk
-      pk.verify(sig, eph_pk.to_bytes)
-    rescue RbNaCl::BadSignatureError
-      raise "Invalid signature: does not match the server public key"
-    end
-
-    begin
-      # check the salt's validity
-      raise "Missing salt" if salt.nil?
-      raise "Invalid salt length: #{salt.bytesize}" unless salt.bytesize == 16
-      raise "Salt is all zeros" if salt == ("\x00" * 16)
-      raise "Low-entropy salt (repeated byte)" if salt.each_byte.uniq.length == 1
-
-    rescue => e
-      raise "Salt verification failed: #{e.message}"
-    end
-
-    
-    { public_key: pk, ephemeral_key: eph_pk, sig: sig, salt: salt }
-  end
-
-
-  # function to obtain the key_materials
-  def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
-    # Shared secret derived from the server's private key (eph_sk) and 
-    # the received client's ephemeral pub key (remote_eph_pk)
-    shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk).key
-
-    # Let's make sure the derived shared key is safe (non zeros)
-    raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
-
-    # make info include the transcript to bind the keys
-    transcript = "ssh-like" + local_eph_pk + remote_eph_pk
-
-    # 4) Derive keys, first create a 64 bytes long key material (km) then split it in half
-    # obtain so the encription key and the mac_key 
-    km = OpenSSL::KDF.hkdf(shared_secret, salt: salt, info: transcript, length: 64, hash: "SHA256")
-  end
 
 
 end

@@ -34,14 +34,14 @@ class SecureClient
 
     # obtain and validate keys
     puts "obtain kex"
-    blob = receive_and_check(sock)
+    keys = receive_and_check(sock)
    
     # Receive server's public key, ephemeral public key and signature
-    keys = assigner(blob)
     server_pk = keys[:public_key]
     server_eph_pk = keys[:ephemeral_key]
     salt = keys[:salt]
     server_sig = keys[:sig]
+    binding.pry
     puts "kex received"
 
     # Send public signing key and ephemeral key (kex)

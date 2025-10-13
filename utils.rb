@@ -8,9 +8,7 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 
   def confirm_kex_arrived(sock, digest)
-    binding.pry
     confirmation = read_blob(sock)
-    binding.pry
       if confirmation == digest
       
         puts "Kex sent and received"
@@ -28,10 +26,10 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     returned_blob = read_blob(sock)
 
     # send back hash of blob
-    binding.pry
     blob_confirmation(sock, returned_blob)
 
-    
+    # 
+    keys = kex_parser(returned_blob)
     rescue IOError, Errno::EPIPE => e
       warn "Socket read failed: #{e.class} - #{e.message}"
       raise
@@ -40,8 +38,18 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
       raise  
   end 
 
-  def kex_assigner
-    
+  def kex_parser(blob)
+    # keys = [:public_key, :ephemeral_key, :sig, :salt]
+    result = []
+    pos = 0 
+    4.times do 
+      len = blob.byteslice(pos, 4).unpack1('N')
+      pos += 4
+      payload = blob.byteslice(pos, len)
+      pos += len
+      result << payload  
+    end
+    kex = handshake_check(result[0], result[1], result[2], result[3]) 
   end
 
   def blob_confirmation(sock, blob)
@@ -53,7 +61,7 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
   # function to obtain the full content of the socket
   def read_blob(sock, timeout: 10, max_attempts:5)
     attempts = 0
-
+    
     begin
       attempts += 1
       # read header (4 bytes), waits 10 seconds before giving up

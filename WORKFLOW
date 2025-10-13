@@ -1,8 +1,11 @@
-	TCP connection
-Client => => => => => server
+     TCP connection
+Client => => =>  server
 
-	send_kex server pub key, ephemeral key, signature
-server => => => => => => => => => => => => => => => client
+(send_kex)       (receive_and_check) 
+server => => =>   client   
+
+(blob_confirmation)   (confirm_kex_arrived)
+client => => => => => server
 	
-client =>  receive_and_check => handshake_check
+client =>  receive_and_check => handshake_check 
 

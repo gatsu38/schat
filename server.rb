@@ -45,8 +45,10 @@ class SecureServer
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]
     client_sig = keys[:sig]
+    binding.pry
     # call function to create the key materials
     # obtain encription and mac keys from the key material
+    
     key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
     enc_key = key_material[0,32]
     mac_key = key_material[32,32]

@@ -1,3 +1,4 @@
+require 'ed25519'
 require 'socket'
 require 'rbnacl'
 require 'openssl'
@@ -22,16 +23,15 @@ class SecureServer
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-
     # Sign ephemeral pub with host key, creates a signature
-    sig = @host_sk.sign(eph_pk.to_bytes)
+    sig = @host_sk.sign(eph_pk.to_s)
 
-    # create a salt for the session
-    session_salt = SecureRandom.random_bytes(16)
-
+    # !!!! ERROR HAS TO BE FOR EACH MESSAGE ONLY FOR TEST create a nonce for the session
+    nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
-    send_kex(sock, @host_pk, eph_pk, sig, session_salt)
+    send_kex(sock, @host_pk, eph_pk, sig, nonce)
     # confirm kex has been sent
     # confirm_kex_arrived(sock, sig)
 
@@ -45,45 +45,52 @@ class SecureServer
     client_pk = keys[:public_key]
     client_eph_pk = keys[:ephemeral_key]
     client_sig = keys[:sig]
-    binding.pry
     # call function to create the key materials
     # obtain encription and mac keys from the key material
+
+
+    server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
+    message = read_blob(sock)
+    plaintext = server_box.decrypt(nonce, message)
+    puts "#{plaintext}"
+    binding.pry
+    puts "aasdasdsadasdassd"
     
-    key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
-    enc_key = key_material[0,32]
-    mac_key = key_material[32,32]
+#    key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
+ #   enc_key = key_material[0,32]
+  #  mac_key = key_material[32,32]
 
     # Receive nonce, ciphertext, mac and check for proper size/content value
-    nonce = read_blob(sock)
-    ciphertext = read_blob(sock)
-    mac = read_blob(sock)
-    check_nonce_ciph
+ #   nonce = read_blob(sock)
+  #  ciphertext = read_blob(sock)
+  #  mac = read_blob(sock)
+#    check_nonce_ciph
 
-    raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
-    raise "Invalid ciphertext: empty or nil" if ciphertext.nil? || ciphertext.empty?
-    raise "Invalid MAC length: expected 32, got #{mac&.bytesize || 0}" if mac.nil? || mac.bytesize != 32
+ #   raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
+ #   raise "Invalid ciphertext: empty or nil" if ciphertext.nil? || ciphertext.empty?
+ #   raise "Invalid MAC length: expected 32, got #{mac&.bytesize || 0}" if mac.nil? || mac.bytesize != 32
 
     # Verify HMAC
-    hmac = OpenSSL::HMAC.digest("SHA256", mac_key, nonce + ciphertext)
-    if hmac != mac
-      puts "HMAC failed!"
-      sock.close
-      return
-    end
+#    hmac = OpenSSL::HMAC.digest("SHA256", mac_key, nonce + ciphertext)
+  #  if hmac != mac
+  #    puts "HMAC failed!"
+  #    sock.close
+  #    return
+  #  end
 
     # Decrypt AES-CTR
     # create a new cipher object
-    cipher = OpenSSL::Cipher.new("aes-256-ctr")
+   # cipher = OpenSSL::Cipher.new("aes-256-ctr")
     # sets cipher to decryption mode
-    cipher.decrypt
+  #  cipher.decrypt
     # set decryption key
-    cipher.key = enc_key
+  #  cipher.key = enc_key
     # set initialization vector to nonce
-    cipher.iv = nonce
+   # cipher.iv = nonce
     # obtain fully decrypted text
-    plaintext = cipher.update(ciphertext) + cipher.final
+   # plaintext = cipher.update(ciphertext) + cipher.final
 
-    puts "Received: #{plaintext}"
+    #puts "Received: #{plaintext}"
     sock.write("OK")
     sock.close
   end

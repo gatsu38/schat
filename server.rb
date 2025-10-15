@@ -152,6 +152,7 @@ class SecureServer
     end
   end
 
+  # safe database shutdown
   def shutdown(server)
     begin
       puts "\nShutting down server..."

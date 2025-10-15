@@ -54,35 +54,25 @@ class SecureClient
     binding.pry
     puts "hi"        
 
-    
-#    key_material = key_material_func(eph_sk, eph_pk, server_eph_pk, salt) 
- #   enc_key = key_material[0,32]
-  #  mac_key = key_material[32,32]
-
-    # 5) Encrypt
-   # nonce = SecureRandom.random_bytes(16)
-   # cipher = OpenSSL::Cipher.new("aes-256-ctr")
-   # cipher.encrypt
-   # cipher.key = enc_key
-   # cipher.iv  = nonce
-   # ciphertext = cipher.update(msg) + cipher.final
-
-#    mac = OpenSSL::HMAC.digest("SHA256", mac_key, nonce + ciphertext)
-
-    # 6) Send client eph pub, nonce, ciphertext, mac
- #   send_blob(sock, eph_pk.to_bytes)
- #   send_blob(sock, nonce)
- #   send_blob(sock, ciphertext)
- #   send_blob(sock, mac)
-
-  #  puts "Server says: #{sock.read}"
     sock.close
   end
 
-
-  def send_blob(sock, data)
-    sock.write([data.bytesize].pack("N") + data)
+  def check_messages
+    
   end
+
+  # inside the contact_list there must be a new contact option and the list of available chats
+  # the existing contacts must have a unique check in case of a new message 
+  def contact_list
+    
+  end
+
+  def registration(sock)
+    puts "Choose a nickname: "
+    
+    send_registration(sock, nickname, eph_pk, password, eph_pk_array)
+  end
+
 end
 
 client = SecureClient.new("127.0.0.1", 2222)

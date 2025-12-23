@@ -8,6 +8,9 @@ require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
 
+PROTOCOL_ID = "myproto-v1"
+MSG_CLIENT_HELLO = "\x01"
+MSG_SERVER_HELLO = "\x02"
 
 # used for error handling
 class BlobReadError < StandardError; end
@@ -17,23 +20,42 @@ class BlobSizeError < BlobReadError; end
 class SecureServer
   include Utils
 
+  def sig_builder(client_nonce, eph_pk, server_nonce)
+    puts "building signature for server authentication"
+    transcript = [PROTOCOL_ID.bytesize].pack("N") + PROTOCOL_ID + ["server".bytesize].pack("N") + "server" + @host_pk.to_bytes + client_nonce + server_nonce + eph_pk.to_bytes
+    sig = @host_sk.sign(transcript)
+  end
+
+  def hello_back_method(signature, eph_pk, server_nonce)
+    payload = [PROTOCOL_ID.bytesize].pack("N") + PROTOCOL_ID + MSG_SERVER_HELLO + ["server".bytesize].pack("N") + "server" + @host_pk.to_bytes + eph_pk.to_bytes + server_nonce + signature
+    payload
+  end
+
   # handles a single client 
   def handle_client(sock)
-    puts "handle client"
+
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-    # Sign ephemeral pub with host key, creates a signature
-    sig = @host_sk.sign(eph_pk.to_s)
 
-    # !!!! ERROR HAS TO BE FOR EACH MESSAGE ONLY FOR TEST create a nonce for the session
-    nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    # receive client's first protocol connection: just a nonce
+    client_nonce = receive_nonce(sock)
+
+    # creates the server_nonce
+    server_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    
+    # create a signature only valid for that nonce
+    signature = sig_builder(client_nonce, eph_pk, server_nonce)
+
+    # create the payload to be sent together with the signature in order to verify the server's authenticity 
+    hello_back_payload = hello_back_method(signature, eph_pk, server_nonce)
+
+    # send the first nonce to the client
+    write_all(sock, hello_back_payload)
     
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
     send_kex(sock, @host_pk, eph_pk, sig, nonce)
-    # confirm kex has been sent
-    # confirm_kex_arrived(sock, sig)
 
     # Receive host pub, server eph pub, signature
     puts "start kex receiving"
@@ -48,49 +70,11 @@ class SecureServer
     # call function to create the key materials
     # obtain encription and mac keys from the key material
 
-
     server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
     message = read_blob(sock)
     plaintext = server_box.decrypt(nonce, message)
     puts "#{plaintext}"
-    binding.pry
-    puts "aasdasdsadasdassd"
     
-#    key_material = key_material_func(eph_sk, eph_pk, client_eph_pk, session_salt)
- #   enc_key = key_material[0,32]
-  #  mac_key = key_material[32,32]
-
-    # Receive nonce, ciphertext, mac and check for proper size/content value
- #   nonce = read_blob(sock)
-  #  ciphertext = read_blob(sock)
-  #  mac = read_blob(sock)
-#    check_nonce_ciph
-
- #   raise "Invalid nonce length: expected 12 bytes, got #{nonce&.bytesize || 0}" unless nonce&.bytesize == 12
- #   raise "Invalid ciphertext: empty or nil" if ciphertext.nil? || ciphertext.empty?
- #   raise "Invalid MAC length: expected 32, got #{mac&.bytesize || 0}" if mac.nil? || mac.bytesize != 32
-
-    # Verify HMAC
-#    hmac = OpenSSL::HMAC.digest("SHA256", mac_key, nonce + ciphertext)
-  #  if hmac != mac
-  #    puts "HMAC failed!"
-  #    sock.close
-  #    return
-  #  end
-
-    # Decrypt AES-CTR
-    # create a new cipher object
-   # cipher = OpenSSL::Cipher.new("aes-256-ctr")
-    # sets cipher to decryption mode
-  #  cipher.decrypt
-    # set decryption key
-  #  cipher.key = enc_key
-    # set initialization vector to nonce
-   # cipher.iv = nonce
-    # obtain fully decrypted text
-   # plaintext = cipher.update(ciphertext) + cipher.final
-
-    #puts "Received: #{plaintext}"
     sock.write("OK")
     sock.close
   end

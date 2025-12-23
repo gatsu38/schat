@@ -7,8 +7,11 @@ require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
 
+PROTOCOL_ID = "myproto-v1"
+MSG_CLIENT_HELLO = "\x01"
 
 class SecureClient
+
   include Utils
 
   def initialize(host, port)
@@ -33,10 +36,28 @@ class SecureClient
     sock = TCPSocket.new(@host, @port)
     puts "TCP connection established"
 
-    # obtain and validate keys
-    puts "obtain kex"
+
+    opening_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    opening_message = [PROTOCOL_ID.bytesize].pack("N") + PROTOCOL_ID + MSG_CLIENT_HELLO + opening_nonce
+    
+    # send the first nonce to the server
+    begin
+      write_all(sock, opening_message)
+      binding.pry
+    rescue IOError => e
+      log("Connection failed: #{e.message}")
+      exit
+    end    
+
+    # receive the signature and what's needed to verify it
+    hello_back_payload = read_blob(sock)
+
+    # verify server identity
+    server_verification(hello_back_payload)
+
+    # receive kex
+    puts "receive kex"        
     keys = receive_and_check(sock)
-    # alice_box = RbNaCl::Box.new(bob_p, alice_s)
        
     # Receive server's public key, ephemeral public key and signature
     server_pk = keys[:public_key]
@@ -51,7 +72,6 @@ class SecureClient
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
     ciphertext = client_box.encrypt(nonce, msg)
     write_all(sock, ciphertext)
-    binding.pry
     puts "hi"        
 
     sock.close

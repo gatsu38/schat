@@ -9,3 +9,11 @@ client => => => => => server
 	
 client =>  receive_and_check => handshake_check 
 
+
+        (client_nonce)
+client =>        server
+
+        signs( with client_nonce and server_nonce)
+server => client
+
+

@@ -1,11 +1,57 @@
 # reading and writing functions
 # as well as checks
 
+#LIST OF FUNCTIONS:
+# write_all           (checked) 
+# read_blob           (checked)
+# blob_confirmation   (checked)
+# confirm_kex_arrived (checked)
+# kex_parser          (checked)
+# handshake_check     (checked)
+
 require 'timeout'
 require 'rbnacl'
 module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
+MAX_FIELD_SIZE = 1024
+
+  def receive_nonce(sock)
+    blob = read_blob(sock)
+    offset = 0
+
+    # 1) Read protocol ID length (4 bytes)
+    raise IOError, "Blob too short for protocol length" if blob.bytesize < 4
+    proto_len = blob.unpack1("N")
+    offset += 4
+
+    # 2) Read protocol ID
+    raise IOError, "Blob too short for protocol ID" if blob.bytesize < offset + proto_len
+    protocol_id = blob.byteslice(offset, proto_len)
+    offset += proto_len
+
+    unless protocol_id == PROTOCOL_ID
+      raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
+    end
+
+    # 3) Read message type (1 byte)
+    raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
+    msg_type = blob.getbyte(offset)
+    offset += 1
+
+    unless msg_type == MSG_CLIENT_HELLO.getbyte(0)
+      raise IOError, "Unexpected message type: #{msg_type}"
+    end
+
+    # 4) Remaining bytes are the nonce
+    nonce = blob.byteslice(offset, blob.bytesize - offset)
+
+    # Optional sanity check
+    unless nonce.bytesize == RbNaCl::Box.nonce_bytes
+      raise IOError, "Invalid nonce size: #{nonce.bytesize}"
+    end
+    nonce
+  end
 
 
   # function to receive public key, ephimeral key and signature
@@ -41,10 +87,19 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
     result = []
     pos = 0 
     4.times do 
+
+      # raise error if the length header exceeds the size of the blob
+      raise IOError, "Truncated blob (missing length for field #{i})" if pos + 4 > blob_size
       len = blob.byteslice(pos, 4).unpack1('N')
       pos += 4
+      # raise error if the field is unreasonably large
+      raise IOError, "Field #{i} too large (#{len} bytes)" if len > MAX_FIELD_SIZE
+      # raise error if the blob is smaller than the declared size
+      raise IOError, "Truncated blob (field #{i})" if pos + len > blob_size
       payload = blob.byteslice(pos, len)
       pos += len
+      # raise error if payload is nil or incongruency between payload actual size and declared size
+      raise IOError, "Invalid payload for field #{i}" if payload.nil? || payload.bytesize != len
       result << payload  
     end
     kex = handshake_check(result[0], result[1], result[2], result[3]) 
@@ -172,9 +227,9 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
         blob << chunk
       end
 
-      # make sure the full kex has been sent with the exact size
+      # make sure the full blob has been sent with the exact size
       unless header.unpack1("N") == blob.size
-        raise IOError, "KEX length mismatch: expected size: #{header.unpack1("N")}, obtained: #{blob.size}"
+        raise IOError, "blob length mismatch: expected size: #{header.unpack1("N")}, obtained: #{blob.size}"
       end
 
       blob
@@ -224,43 +279,43 @@ MAX_BLOB_SIZE = 16 * 1024 * 1024
 
 
   # function to obtain the key_materials
-  def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
+  #def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
     # Shared secret derived from the server's private key (eph_sk) and 
     # the received client's ephemeral pub key (remote_eph_pk)
     # shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk)
-    shared_secret = local_eph_sk.derive(remote_eph_pk)
+  #  shared_secret = local_eph_sk.derive(remote_eph_pk)
 
     # Let's make sure the derived shared key is safe (non zeros)
-    raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
+  #  raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
 
     # make info include the transcript to bind the keys
-    transcript = "ssh-like" + local_eph_pk + remote_eph_pk
+  #  transcript = "ssh-like" + local_eph_pk + remote_eph_pk
 
     # 4) Derive keys, first create a 64 bytes long key material (km) then split it in half
     # obtain so the encription key and the mac_key 
-    km = OpenSSL::KDF.hkdf(shared_secret, salt: salt, info: transcript, length: 64, hash: "SHA256")
-  end
+  #  km = OpenSSL::KDF.hkdf(shared_secret, salt: salt, info: transcript, length: 64, hash: "SHA256")
+  #end
 
   # function to check the client_eph_pk (size, validity, non zeros)
-  def key_format_check(raw_key)
-  len = raw_key&.bytesize
+  #def key_format_check(raw_key)
+  #len = raw_key&.bytesize
 
   # X25519 public keys are always 32 bytes, guarantee size is correct
   # guarantee key is actually a valid key and also non zeros
-  raise "Invalid public key length: #{len}" if len != RbNaCl::PublicKey::BYTES
-  raise "Failed to read full public key" if client_eph_pk.nil? || raw_key.bytesize != len
-  raise "Rejected all-zero public key" if raw_key == ("\x00" * 32)
+  #raise "Invalid public key length: #{len}" if len != RbNaCl::PublicKey::BYTES
+  #raise "Failed to read full public key" if client_eph_pk.nil? || raw_key.bytesize != len
+  #raise "Rejected all-zero public key" if raw_key == ("\x00" * 32)
 
     # create an object with the received bytes (client's ephimeral public key)
     # guarantees the key is a proper object and handled safely
-    begin
-      client_eph_pk = RbNaCl::PublicKey.new(raw_key)
-    rescue RbNaCl::LengthError => e
-      raise "Invalid public key: #{e.message}"
-    end
+  #  begin
+  #    client_eph_pk = RbNaCl::PublicKey.new(raw_key)
+  #  rescue RbNaCl::LengthError => e
+  #    raise "Invalid public key: #{e.message}"
+  #  end
 
-  client_eph_pk
-  end
+  #client_eph_pk
+  #end
 
 
 

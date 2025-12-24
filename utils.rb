@@ -4,7 +4,7 @@
 #LIST OF FUNCTIONS:
 # write_all           (checked) 
 # read_blob           (checked)
-# blob_confirmation   (checked)
+# digest_confirmation   (checked)
 # confirm_kex_arrived (checked)
 # kex_parser          (checked)
 # handshake_check     (checked)
@@ -16,44 +16,6 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
 
-  def receive_nonce(sock)
-    blob = read_blob(sock)
-    offset = 0
-
-    # 1) Read protocol ID length (4 bytes)
-    raise IOError, "Blob too short for protocol length" if blob.bytesize < 4
-    proto_len = blob.unpack1("N")
-    offset += 4
-
-    # 2) Read protocol ID
-    raise IOError, "Blob too short for protocol ID" if blob.bytesize < offset + proto_len
-    protocol_id = blob.byteslice(offset, proto_len)
-    offset += proto_len
-
-    unless protocol_id == PROTOCOL_ID
-      raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
-    end
-
-    # 3) Read message type (1 byte)
-    raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
-    msg_type = blob.getbyte(offset)
-    offset += 1
-
-    unless msg_type == MSG_CLIENT_HELLO.getbyte(0)
-      raise IOError, "Unexpected message type: #{msg_type}"
-    end
-
-    # 4) Remaining bytes are the nonce
-    nonce = blob.byteslice(offset, blob.bytesize - offset)
-
-    # Optional sanity check
-    unless nonce.bytesize == RbNaCl::Box.nonce_bytes
-      raise IOError, "Invalid nonce size: #{nonce.bytesize}"
-    end
-    nonce
-  end
-
-
   # function to receive public key, ephimeral key and signature
   def receive_and_check(sock)
     raise ArgumentError, "Socket is nil" if sock.nil?
@@ -61,7 +23,7 @@ MAX_FIELD_SIZE = 1024
     returned_blob = read_blob(sock)
 
     # send back hash of blob
-    blob_confirmation(sock, returned_blob)
+    digest_confirmation(sock, returned_blob)
 
     # parse the blob into 4 different contents 
     keys = kex_parser(returned_blob)
@@ -75,7 +37,16 @@ MAX_FIELD_SIZE = 1024
 
 
   # send back a hash of the blob (kex) to confirm arrival of kex
-  def blob_confirmation(sock, blob)
+  def digest_confirmation(sock, blob)
+    raise ArgumentError, "Socket is nil" if sock.nil?
+    raise ArgumentError, "Blob is nil" if blob.nil?
+
+  unless blob.is_a?(String)
+    raise TypeError, "Expected raw bytes (String), got #{blob.class}"
+  end
+
+  blob = blob.b  # enforce binary encoding
+
     digest = RbNaCl::Hash.sha256(blob)
     write_all(sock, digest)
   end
@@ -155,13 +126,19 @@ MAX_FIELD_SIZE = 1024
     begin
 
       # check blob content not nil
-      raise ArgumentError, "Kex argument missing" if blobs.nil?
+      raise ArgumentError, "Kex argument missing" if blobs.nil? || blobs.empty?
 
-      # build a big payload made of all the content needed for kex
-      payload = blobs.flat_map do |blob|
-        data = blob.respond_to?(:to_bytes) ? blob.to_bytes : blob
-        [ [data.bytesize].pack("N"), data]
-      end.join
+      payload = +""
+
+      blobs.each do |data|
+        unless data.is_a?(string)
+          raise TypeError, "Expected Raw bytes (string), got #{data.class}"
+        end
+        
+        data = data.b
+      payload << [data.bytesize].pack("N")
+      payload << data
+      end  
 
       # create a digest of the whole payload less the total size header
       digest = RbNaCl::Hash.sha256(payload)

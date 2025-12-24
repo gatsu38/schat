@@ -8,9 +8,9 @@ require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
 
-PROTOCOL_ID = "myproto-v1"
-MSG_CLIENT_HELLO = "\x01"
-MSG_SERVER_HELLO = "\x02"
+PROTOCOL_NAME = "myproto-v1"
+MSG_CLIENT_HELLO_ID = "\x01"
+MSG_SERVER_HELLO_ID = "\x02"
 
 # used for error handling
 class BlobReadError < StandardError; end
@@ -22,14 +22,71 @@ class SecureServer
 
   def sig_builder(client_nonce, eph_pk, server_nonce)
     puts "building signature for server authentication"
-    transcript = [PROTOCOL_ID.bytesize].pack("N") + PROTOCOL_ID + ["server".bytesize].pack("N") + "server" + @host_pk.to_bytes + client_nonce + server_nonce + eph_pk.to_bytes
+    transcript = [PROTOCOL_NAME.bytesize].pack("n") + 
+      PROTOCOL_NAME + 
+      MSG_SERVER_HELLO_ID +
+      "server" + 
+      @host_pk.to_bytes + 
+      client_nonce + 
+      server_nonce + 
+      eph_pk.to_bytes
+      
     sig = @host_sk.sign(transcript)
+    sig
   end
 
-  def hello_back_method(signature, eph_pk, server_nonce)
-    payload = [PROTOCOL_ID.bytesize].pack("N") + PROTOCOL_ID + MSG_SERVER_HELLO + ["server".bytesize].pack("N") + "server" + @host_pk.to_bytes + eph_pk.to_bytes + server_nonce + signature
+  def hello_back_payload_builder(signature, eph_pk, server_nonce)
+    payload = 
+      [PROTOCOL_NAME.bytesize].pack("n") + 
+      PROTOCOL_NAME + 
+      MSG_SERVER_HELLO_ID +
+      "server" + 
+      @host_pk.to_bytes + 
+      eph_pk.to_bytes + 
+      server_nonce + 
+      signature
+      
     payload
   end
+
+  # used to receive the hell message from client   
+  def receive_hello(sock)
+    blob = read_blob(sock)
+    offset = 0
+
+    # 1) Read protocol name length (2 bytes)
+    raise IOError, "Blob too short for protocol length" if blob.bytesize < 2    
+    proto_len = blob.unpack1("n")
+    offset += 2
+
+    # 2) Read protocol name
+    raise IOError, "Blob too short for protocol name" if blob.bytesize < offset + proto_len
+    client_protocol_name = blob.byteslice(offset, proto_len)
+    offset += proto_len
+
+    unless client_protocol_name == PROTOCOL_NAME
+      raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
+    end
+
+    # 3) Read message type (1 byte)
+    raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
+    msg_type = blob.getbyte(offset)
+    offset += 1
+
+    unless msg_type == MSG_CLIENT_HELLO_ID.getbyte(0)
+      raise IOError, "Unexpected message type: #{msg_type}"
+    end
+
+    # 4) Remaining bytes are the nonce
+    client_nonce = blob.byteslice(offset, blob.bytesize - offset)
+
+    # Optional sanity check
+    unless client_nonce.bytesize == RbNaCl::Box.nonce_bytes
+      raise IOError, "Invalid nonce size: #{nonce.bytesize}"
+    end
+    client_nonce
+  end
+
 
   # handles a single client 
   def handle_client(sock)
@@ -39,7 +96,7 @@ class SecureServer
     eph_pk = eph_sk.public_key
 
     # receive client's first protocol connection: just a nonce
-    client_nonce = receive_nonce(sock)
+    client_nonce = receive_hello(sock)
 
     # creates the server_nonce
     server_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
@@ -48,8 +105,8 @@ class SecureServer
     signature = sig_builder(client_nonce, eph_pk, server_nonce)
 
     # create the payload to be sent together with the signature in order to verify the server's authenticity 
-    hello_back_payload = hello_back_method(signature, eph_pk, server_nonce)
-
+    hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce)    
+    binding.pry
     # send the first nonce to the client
     write_all(sock, hello_back_payload)
     

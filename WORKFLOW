@@ -1,5 +1,10 @@
      TCP connection
-Client => => =>  server
+
+(send_nonce)   (receive_hello)
+client  ==>    server
+
+(server_verification)  (hello_back_method)
+client        <==      server
 
 (send_kex)       (receive_and_check) 
 server => => =>   client   

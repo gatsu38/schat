@@ -8,6 +8,7 @@ require 'pry'
 require 'pry-byebug'
 
 PROTOCOL_NAME = "myproto-v1"
+MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
 
@@ -24,25 +25,14 @@ class SecureClient
     @client_pk = @client_sk.verify_key
   end
 
-  # helper function used to read exactly the required size
-  def read_exact(buf, offset, len)
-  chunk = buf[offset, len]
-    if chunk.nil? || chunk.bytesize != len
-      raise ProtocolError, "Truncated #{field_name}"
-    end
-  chunk
-  end
 
   # verify server identity and connection genuinity
-  def server_verification(opening_nonce, payload)
+  def server_identity_verification(opening_nonce, payload)
     offset = 0
-    # protocl name length (2 bytes)
-    proto_len = read_exact(payload, offset, 2).unpack1("n")
-    offset += 2
 
     # protocol name
-    proto = read_exact(payload, offset, proto_len)
-    offset += proto_len
+    proto = read_exact(payload, offset, 30)
+    offset += 30
     raise "protocol mismatch" unless proto == PROTOCOL_NAME
 
     # message ID
@@ -79,6 +69,11 @@ class SecureClient
     # server nonce
     server_nonce = read_exact(payload, offset, RbNaCl::Box.nonce_bytes)
     offset += RbNaCl::Box.nonce_bytes
+
+    # check if the nonce is non zero
+    if server_nonce.bytes.all? { |b| b == 0 }
+      raise ProtocolError, "Invalid server nonce (all-zero)"
+    end
 
     # signature
     signature = read_exact(payload, offset, 64)
@@ -120,23 +115,26 @@ class SecureClient
     sock = TCPSocket.new(@host, @port)
     puts "TCP connection established"
 
+    # protocol name + padding preparation
+    protocol_start = protocol_start_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
     # create the nonce used to validate the session
     opening_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
-    # send the nonce and start protocol
+
+    # create the opening message for client hello
     opening_message = [PROTOCOL_NAME.bytesize].pack("n") + 
-      PROTOCOL_NAME + 
+      protocol_start +
       MSG_CLIENT_HELLO_ID + 
       opening_nonce
     
     # send the first nonce to the server
     write_all(sock, opening_message)
 
-    binding.pry
     # receive the signature and what's needed to verify it
     hello_back_payload = read_blob(sock)
 
     # verify server identity
-    server_verification(opening_nonce, hello_back_payload)
+    server_identity_verification(opening_nonce, hello_back_payload)
 
     # receive kex
     puts "receive kex"        

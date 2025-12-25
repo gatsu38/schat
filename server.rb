@@ -9,6 +9,7 @@ require 'pry'
 require 'pry-byebug'
 
 PROTOCOL_NAME = "myproto-v1"
+MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
 
@@ -20,6 +21,7 @@ class BlobSizeError < BlobReadError; end
 class SecureServer
   include Utils
 
+  # build the signature to send back to the client after hello
   def sig_builder(client_nonce, eph_pk, server_nonce)
     puts "building signature for server authentication"
     transcript = [PROTOCOL_NAME.bytesize].pack("n") + 
@@ -35,10 +37,12 @@ class SecureServer
     sig
   end
 
+  protocol_start = protocol_start_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+  # build the hello back payload
   def hello_back_payload_builder(signature, eph_pk, server_nonce)
     payload = 
-      [PROTOCOL_NAME.bytesize].pack("n") + 
-      PROTOCOL_NAME + 
+      protocol_start +
       MSG_SERVER_HELLO_ID +
       "server" + 
       @host_pk.to_bytes + 
@@ -52,23 +56,19 @@ class SecureServer
   # used to receive the hell message from client   
   def receive_hello(sock)
     blob = read_blob(sock)
+    raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 24
     offset = 0
 
-    # 1) Read protocol name length (2 bytes)
-    raise IOError, "Blob too short for protocol length" if blob.bytesize < 2    
-    proto_len = blob.unpack1("n")
-    offset += 2
-
-    # 2) Read protocol name
+    # 1) Read protocol name
     raise IOError, "Blob too short for protocol name" if blob.bytesize < offset + proto_len
-    client_protocol_name = blob.byteslice(offset, proto_len)
-    offset += proto_len
+    client_protocol_name = read_exact(blob, 0, 30)
+    offset += 30
 
     unless client_protocol_name == PROTOCOL_NAME
       raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
     end
 
-    # 3) Read message type (1 byte)
+    # 2) Read message type (1 byte)
     raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
     msg_type = blob.getbyte(offset)
     offset += 1
@@ -77,8 +77,8 @@ class SecureServer
       raise IOError, "Unexpected message type: #{msg_type}"
     end
 
-    # 4) Remaining bytes are the nonce
-    client_nonce = blob.byteslice(offset, blob.bytesize - offset)
+    # 3) Remaining bytes are the nonce
+    client_nonce = read_exact(blob, offset, 24)
 
     # Optional sanity check
     unless client_nonce.bytesize == RbNaCl::Box.nonce_bytes
@@ -106,7 +106,7 @@ class SecureServer
 
     # create the payload to be sent together with the signature in order to verify the server's authenticity 
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce)    
-    binding.pry
+
     # send the first nonce to the client
     write_all(sock, hello_back_payload)
     

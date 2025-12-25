@@ -16,6 +16,26 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
 
+    # protocol name + padding preparation
+  def protocol_start_builder(current_protocol_name, max_protocol_size)
+    protocol_start = current_protocol_name.b
+    if protocol_start.bytesize > max_protocol_size
+      raise ArgumentError, "PROTOCOL_NAME too long (max #{MAX_PROTO_FIELD} bytes)"
+    end
+    padding_len = max_protocol_size - protocol_start.bytesize
+    padding = "\x00" * padding_len  
+  end
+
+  # helper function used to read exactly the required size
+  def read_exact(buf, offset, len)
+  chunk = buf[offset, len]
+    if chunk.nil? || chunk.bytesize != len
+      raise ProtocolError, "Truncated #{field_name}"
+    end
+  chunk
+  end
+
+
   # function to receive public key, ephimeral key and signature
   def receive_and_check(sock)
     raise ArgumentError, "Socket is nil" if sock.nil?
@@ -224,12 +244,12 @@ MAX_FIELD_SIZE = 1024
 
 
   # helper method to ensure full_write on the remote socket
-  def write_all(sock, payload)
+  def write_all(sock, payload, timeout: 10, max_attempts: 5)
 
     # prefix the payload with the whole size of the payload
-    total_length = payload.bytesize
-    header = [total_length].pack("N")
-    data = header + payload
+    data =
+      [payload.bytesize].pack("N") +
+      payload
   
     total_written = 0
     attempts = 0 

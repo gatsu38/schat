@@ -37,10 +37,12 @@ class SecureServer
     sig
   end
 
-  protocol_start = protocol_start_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
 
   # build the hello back payload
   def hello_back_payload_builder(signature, eph_pk, server_nonce)
+
+  protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+    
     payload = 
       protocol_start +
       MSG_SERVER_HELLO_ID +
@@ -55,16 +57,20 @@ class SecureServer
 
   # used to receive the hell message from client   
   def receive_hello(sock)
+    puts "receive hello nonce"
     blob = read_blob(sock)
+    binding.pry
     raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 24
     offset = 0
 
     # 1) Read protocol name
-    raise IOError, "Blob too short for protocol name" if blob.bytesize < offset + proto_len
+    raise IOError, "Blob too short for protocol name" if blob.bytesize < offset
     client_protocol_name = read_exact(blob, 0, 30)
     offset += 30
 
-    unless client_protocol_name == PROTOCOL_NAME
+    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+    unless client_protocol_name == protocol_start
       raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
     end
 
@@ -95,7 +101,10 @@ class SecureServer
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
+    binding.pry
+
     # receive client's first protocol connection: just a nonce
+    puts "receive client's nonce"
     client_nonce = receive_hello(sock)
 
     # creates the server_nonce
@@ -107,8 +116,9 @@ class SecureServer
     # create the payload to be sent together with the signature in order to verify the server's authenticity 
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce)    
 
-    # send the first nonce to the client
-    write_all(sock, hello_back_payload)
+    # send the hello back containing the signature and the server nonce among other
+    puts "send hello back"
+    write_all(sock, hello_back_payload, true)
     
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)

@@ -16,14 +16,18 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
 
-    # protocol name + padding preparation
-  def protocol_start_builder(current_protocol_name, max_protocol_size)
+  # builder for client hello: protocol name + padding preparation
+  def protocol_name_builder(current_protocol_name, max_protocol_size)
     protocol_start = current_protocol_name.b
     if protocol_start.bytesize > max_protocol_size
       raise ArgumentError, "PROTOCOL_NAME too long (max #{MAX_PROTO_FIELD} bytes)"
     end
     padding_len = max_protocol_size - protocol_start.bytesize
     padding = "\x00" * padding_len  
+    protocol_name_with_padding =
+      protocol_start +
+      padding
+    protocol_name_with_padding
   end
 
   # helper function used to read exactly the required size
@@ -190,8 +194,25 @@ MAX_FIELD_SIZE = 1024
         raise "Kex receival non confirmed"
       end
   end
- 
 
+  # method to safely read the TCP socket
+  def read_socket(sock, n, timeout)
+    buf = +""
+    
+    while buf.bytesize < n
+      ready = IO.select([sock], nil, nil, timeout)
+      raise Timeout::Error, "Timeout while reading #{n} bytes from socket" unless ready
+
+      begin
+        chunk = sock.readpartial(n - buf.bytesize)
+      rescue EOFError
+        raise EOFError, "Connection closed while reading"
+      end
+      buf << chunk
+    end
+    buf  
+  end
+  
 
   # function to obtain the full content of the socket
   def read_blob(sock, timeout: 10, max_attempts:5)
@@ -199,37 +220,35 @@ MAX_FIELD_SIZE = 1024
     
     begin
       attempts += 1
-      # read header (4 bytes), waits 10 seconds before giving up
-      ready = IO.select([sock], nil, nil, timeout)
-      raise Timeout::Error, "Timeout waiting for length header" unless ready
 
-      # check header's size
-      header = sock.read(4)
-      raise EOFError, "Connection closed while reading length header" if header.nil? || header.bytesize < 4
+      # obtain header
+      header = read_socket(sock, 4, timeout)
 
       # sanity check for payload length
-      blob_len = header.unpack1("N")  # unpack1 gives an integer directly
-      raise BlobSizeError, "Invalid blob size: #{blob_len}" if blob_len < 0 || blob_len > MAX_BLOB_SIZE
+      payload_len = header.unpack1("N")  # unpack1 gives an integer directly
+      raise BlobSizeError, "Invalid blob size: #{payload_len}" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
+
+      flag_in = read_socket(sock, 1, timeout)
+      unless ["\x01", "\x02"].include?(flag_in)
+        raise IOError, "Invalid flag value: #{flag.inspect}"
+      end
 
       # read payload (exactly blob_len bytes) blob will contain the payload
-      # +"" creates a new mutable empty String (not frozen). 
-      blob = +""
-      while blob.bytesize < blob_len
-        ready = IO.select([sock], nil, nil, timeout)
-        raise Timeout::Error, "Timeout while reading blob" unless ready
-
-        chunk = sock.read(blob_len - blob.bytesize)
-        raise EOFError, "Connection closed while reading blob (expected #{blob_len}, got #{blob.bytesize})" if chunk.nil? || chunk.empty?
-
-        blob << chunk
-      end
+      payload = read_socket(sock, payload_len, timeout)
 
       # make sure the full blob has been sent with the exact size
-      unless header.unpack1("N") == blob.size
-        raise IOError, "blob length mismatch: expected size: #{header.unpack1("N")}, obtained: #{blob.size}"
+      unless payload.bytesize == payload_len
+        raise IOError, "payload length mismatch: expected size: #{header.unpack1("N")}, obtained: #{payload.size}"
       end
 
-      blob
+      # send digest confirmation
+      if flag_in == "\x01"
+        digest = RbNaCl::Hash.sha256(payload)
+        write_all(sock, digest, false)
+      end
+
+      # return the payload
+      payload
 
     rescue Timeout::Error, EOFError, BlobSizeError => e
       if attempts < max_attempts
@@ -244,40 +263,61 @@ MAX_FIELD_SIZE = 1024
 
 
   # helper method to ensure full_write on the remote socket
-  def write_all(sock, payload, timeout: 10, max_attempts: 5)
+  def write_all(sock, payload, confirmation_flag, timeout: 10, max_attempts: 5)
+
+  flag = confirmation_flag ? "\x01" : "\x02"
 
     # prefix the payload with the whole size of the payload
     data =
       [payload.bytesize].pack("N") +
+      flag +
       payload
+
+    expected_digest = RbNaCl::Hash.sha256(payload)
   
-    total_written = 0
-    attempts = 0 
+    total_written_on_sock = 0
+    attempts_on_sock = 0
+    attempts_on_wire = 0 
     begin
       # tries to write as many bytes as possible and doesn't block the server
-      while total_written < data.bytesize
-        written = sock.write_nonblock(data[total_written..-1])
-        total_written += written
+      while total_written_on_sock < data.bytesize
+        written = sock.write_nonblock(data[total_written_on_sock..-1])
+        total_written_on_sock += written
       end
 
     # in case of failure wait untill the socket is writable, 5 maximum attempts
     rescue IO::WaitWritable
-      attempts += 1
-        if attempts >= 5
+      attempts_on_sock += 1
+        if attempts_on_sock >= 5
           sock.close
           abort IOError, "Socket not writable after 5 attempts. Sock closed. Schat closed" 
         end  
-      ready = IO.select(nil, [sock], nil, 5)
-      retry if ready 
-      raise IOError, "Socket not writable within timeout"
-      
+      IO.select(nil, [sock], nil, timeout)
+        raise IOError, "Socket not writable within timeout"      
+      retry
     end
+
+    # expect digest from peer
+    return true unless confirmation_flag
+
+    digest_blob = read_blob(sock)
+
+    unless digest_blob.bytesize == 32
+      raise IOError, "Invalid digest size: #{digest_blob.bytesize}"
+    end
+
+    unless digest_blob == expected_digest
+      raise SecurityError, "Digest mismatch (integrity check failed)"
+    end
+
+    true
+
   end
 
 
   # function to obtain the key_materials
-  #def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
-    # Shared secret derived from the server's private key (eph_sk) and 
+  # def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
+  # Shared secret derived from the server's private key (eph_sk) and 
     # the received client's ephemeral pub key (remote_eph_pk)
     # shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk)
   #  shared_secret = local_eph_sk.derive(remote_eph_pk)

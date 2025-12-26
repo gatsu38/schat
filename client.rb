@@ -106,9 +106,6 @@ class SecureClient
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    # Sign ephemeral pub with host key, creates a signature
-    # sig = @client_sk.sign(eph_pk.to_bytes)
-
     puts "created: ephemeral private key, public key and signature"
 
     # establish a connection with the server
@@ -116,21 +113,27 @@ class SecureClient
     puts "TCP connection established"
 
     # protocol name + padding preparation
-    protocol_start = protocol_start_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
 
     # create the nonce used to validate the session
     opening_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
 
-    # create the opening message for client hello
-    opening_message = [PROTOCOL_NAME.bytesize].pack("n") + 
+    # create the opening message for client hello    
+    opening_message = 
       protocol_start +
       MSG_CLIENT_HELLO_ID + 
       opening_nonce
+
+    binding.pry
     
     # send the first nonce to the server
-    write_all(sock, opening_message)
+    puts "send opening nonce"
+    write_all(sock, opening_message, true)
+
+    binding.pry
 
     # receive the signature and what's needed to verify it
+    puts "waiting for server signature"
     hello_back_payload = read_blob(sock)
 
     # verify server identity

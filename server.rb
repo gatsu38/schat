@@ -8,11 +8,24 @@ require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
 
+# METHODS
+# hello_back_payload_builder
+  # build the hello back payload
+# receive_hello
+  # used to receive the hello message from client containing the client nonce
+# handle_client
+  # handles a single client, the main method
+# run
+  # spawns a new thread for each new client connection
+# shutdown
+  # safe database shutdown
+
+
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
-
+MSG_CLIENT_HELLO_ID2 = "\x03"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -21,45 +34,10 @@ class BlobSizeError < BlobReadError; end
 class SecureServer
   include Utils
 
-  # build the signature to send back to the client after hello
-  def sig_builder(client_nonce, eph_pk, server_nonce)
-    puts "building signature for server authentication"
-    transcript = [PROTOCOL_NAME.bytesize].pack("n") + 
-      PROTOCOL_NAME + 
-      MSG_SERVER_HELLO_ID +
-      "server" + 
-      @host_pk.to_bytes + 
-      client_nonce + 
-      server_nonce + 
-      eph_pk.to_bytes
-      
-    sig = @host_sk.sign(transcript)
-    sig
-  end
-
-
-  # build the hello back payload
-  def hello_back_payload_builder(signature, eph_pk, server_nonce)
-
-  protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
-    
-    payload = 
-      protocol_start +
-      MSG_SERVER_HELLO_ID +
-      "server" + 
-      @host_pk.to_bytes + 
-      eph_pk.to_bytes + 
-      server_nonce + 
-      signature
-      
-    payload
-  end
-
-  # used to receive the hell message from client   
+  # usfed to receive the hello message from client   
   def receive_hello(sock)
     puts "receive hello nonce"
     blob = read_blob(sock)
-    binding.pry
     raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 24
     offset = 0
 
@@ -101,9 +79,7 @@ class SecureServer
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    binding.pry
-
-    # receive client's first protocol connection: just a nonce
+    # receive client's first protocol connection: just a nonce "client hello"
     puts "receive client's nonce"
     client_nonce = receive_hello(sock)
 
@@ -111,15 +87,30 @@ class SecureServer
     server_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
     
     # create a signature only valid for that nonce
-    signature = sig_builder(client_nonce, eph_pk, server_nonce)
-
-    # create the payload to be sent together with the signature in order to verify the server's authenticity 
-    hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce)    
+    signature = sig_builder(client_nonce, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)
+    # create the payload to be sent together with the signature in order
+    # for the client to verify the server's authenticity 
+    hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)    
 
     # send the hello back containing the signature and the server nonce among other
     puts "send hello back"
     write_all(sock, hello_back_payload, true)
-    
+
+    # receive the signature and what's required to verify it
+    puts "waiting for the client's signature"
+    client_hello_back_payload = read_blob(sock)
+
+    # create the protocol name + padding
+    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+    # verify client's identity and obtain keys
+    client_info = peer_identity_verification(server_nonce, protocol_start, client_hello_back_payload, "client", MSG_CLIENT_HELLO_ID2)
+
+    client_pk = client_info[:remote_pk]
+    client_eph_pk = client_info[:remote_eph_pk]    
+
+    # assign client's public key, ephemeral public key and signature
+            
     puts "start kex sending"
     # Send public signing key and ephemeral key (kex)
     send_kex(sock, @host_pk, eph_pk, sig, nonce)

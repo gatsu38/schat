@@ -2,12 +2,33 @@
 # as well as checks
 
 #LIST OF FUNCTIONS:
-# write_all           (checked) 
-# read_blob           (checked)
-# digest_confirmation   (checked)
-# confirm_kex_arrived (checked)
-# kex_parser          (checked)
-# handshake_check     (checked)
+# hello_back_payload_builder
+  # build the hello back
+# peer identity verification
+  # verify remote identity and connection genuinity
+# sig_builder
+  # build the signature to send back to the client after hello
+# protocol_name_builder 
+  # builder for client hello, outputs protocol name + padding
+# read_exact
+    # helper function used to read exactly the required size from a buffer
+# receive_and_check
+  # function to receive public key, ephimeral key and signature
+# digest_confirmation
+  # send back a hash of the blob to confirm arrival                     
+# kex_parser
+  # parse the blob to obtain the kex
+# handshake_check
+  # function to check the validity of the keys and signature
+# !!! send_kex
+  # !!! this function is used to send the public and ephemeral keys                          
+# !!! confirm_kex_arrived
+# read_socket
+  # method to safely read the TCP socket
+# read_blob         
+  # function to obtain the full content of the socket
+# write_all
+  # helper method to ensure full_write on the remote socket
 
 require 'timeout'
 require 'rbnacl'
@@ -15,6 +36,118 @@ module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
+
+  # build the hello back payload
+  def hello_back_payload_builder(signature, eph_pk, local_nonce, identity, hello_id)
+
+  protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+    payload =
+      protocol_start +
+      hello_id +
+      identity +
+      @host_pk.to_bytes +
+      eph_pk.to_bytes +
+      local_nonce +
+      signature
+
+    payload
+  end
+
+  # verify remote identity and connection genuinity
+  def peer_identity_verification(nonce, protocol_start, payload, identity, hello_id)
+    offset = 0
+
+    # protocol name
+    proto = read_exact(payload, offset, 30)
+    offset += 30
+    raise "protocol mismatch" unless proto == protocol_start
+
+    # message ID
+    msg_id = read_exact(payload, offset, 1)
+    offset += 1
+    raise "Unexpected message type" unless msg_id == hello_id
+
+    # role of the sender
+    role = read_exact(payload, offset, 6)
+    offset += 6
+    raise "Invalid sender role" unless role == identity
+
+    # server public key
+    remote_pk_bytes = read_exact(payload, offset, 32)
+    offset += 32
+    # check quality of the key
+    begin
+      remote_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(remote_pk_bytes)
+    rescue RbNaCl::CryptoError
+      raise ProtocolError, "Invalid Server public key"
+    end
+    # !!!! TO BE ADD
+    # raise "Untrusted server key" unless server_pk_bytes == @trusted_server_pk
+
+    # server eph pk
+    remote_eph_pk_bytes = read_exact(payload, offset, 32)
+    offset += 32
+    begin
+      remote_eph_pk = RbNaCl::PublicKey.new(remote_eph_pk_bytes)
+    rescue RbNaCl::CryptoError
+      raise ProtocolError, "Invalid server ephemeral public key"
+    end
+
+    # server nonce
+    remote_nonce = read_exact(payload, offset, RbNaCl::Box.nonce_bytes)
+    offset += RbNaCl::Box.nonce_bytes
+
+    # check if the nonce is non zero
+    if remote_nonce.bytes.all? { |b| b == 0 }
+      raise ProtocolError, "Invalid server nonce (all-zero)"
+    end
+
+    # signature
+    remote_signature = read_exact(payload, offset, 64)
+    offset += 64
+    raise "Trailing bytes detected" unless offset == payload.bytesize
+
+    # rebuild transcript
+    transcript =
+      [PROTOCOL_NAME.bytesize].pack("n") +
+      PROTOCOL_NAME +
+      hello_id +
+      identity +
+      remote_pk_bytes +
+      nonce +
+      remote_nonce +
+      remote_eph_pk_bytes
+    # signature verification
+    unless remote_pk.verify(remote_signature, transcript)
+      raise "Server signature verification failed"
+    end
+    puts "signature verified"
+    {remote_pk: remote_pk, remote_eph_pk: remote_eph_pk, remote_nonce: remote_nonce}
+  end
+
+
+  # build the signature to send back to the client after hello
+  def sig_builder(peer_nonce, eph_pk, local_nonce, identity, hello_id)
+
+  unless identity == "client" || identity == "server"
+    raise ProtocolError, "Invalid identity role"
+  end
+
+    puts "building signature for server authentication"
+    transcript =
+      [PROTOCOL_NAME.bytesize].pack("n") +
+      PROTOCOL_NAME +
+      hello_id +
+      identity +
+      @host_pk.to_bytes +
+      peer_nonce +
+      local_nonce +
+      eph_pk.to_bytes
+    sig = @host_sk.sign(transcript)
+    sig
+  end
+
 
   # builder for client hello: protocol name + padding preparation
   def protocol_name_builder(current_protocol_name, max_protocol_size)
@@ -30,7 +163,7 @@ MAX_FIELD_SIZE = 1024
     protocol_name_with_padding
   end
 
-  # helper function used to read exactly the required size
+  # helper function used to read exactly the required size from a buffer
   def read_exact(buf, offset, len)
   chunk = buf[offset, len]
     if chunk.nil? || chunk.bytesize != len
@@ -60,7 +193,7 @@ MAX_FIELD_SIZE = 1024
   end 
 
 
-  # send back a hash of the blob (kex) to confirm arrival of kex
+  # send back a hash of the blob to confirm arrival 
   def digest_confirmation(sock, blob)
     raise ArgumentError, "Socket is nil" if sock.nil?
     raise ArgumentError, "Blob is nil" if blob.nil?
@@ -142,7 +275,7 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # this function is used to send the public and ephemeral keys as well as the signature 
+  # this function is used to send the public and ephemeral keys 
   def send_kex(sock, *blobs)
 
     # check sock not nil
@@ -313,47 +446,5 @@ MAX_FIELD_SIZE = 1024
     true
 
   end
-
-
-  # function to obtain the key_materials
-  # def key_material_func(local_eph_sk, local_eph_pk, remote_eph_pk, salt)
-  # Shared secret derived from the server's private key (eph_sk) and 
-    # the received client's ephemeral pub key (remote_eph_pk)
-    # shared_secret = RbNaCl::Box.new(remote_eph_pk, local_eph_sk)
-  #  shared_secret = local_eph_sk.derive(remote_eph_pk)
-
-    # Let's make sure the derived shared key is safe (non zeros)
-  #  raise "Invalid or unsafe shared secret (all-zero) — abort" if shared_secret == ("\x00" * 32)
-
-    # make info include the transcript to bind the keys
-  #  transcript = "ssh-like" + local_eph_pk + remote_eph_pk
-
-    # 4) Derive keys, first create a 64 bytes long key material (km) then split it in half
-    # obtain so the encription key and the mac_key 
-  #  km = OpenSSL::KDF.hkdf(shared_secret, salt: salt, info: transcript, length: 64, hash: "SHA256")
-  #end
-
-  # function to check the client_eph_pk (size, validity, non zeros)
-  #def key_format_check(raw_key)
-  #len = raw_key&.bytesize
-
-  # X25519 public keys are always 32 bytes, guarantee size is correct
-  # guarantee key is actually a valid key and also non zeros
-  #raise "Invalid public key length: #{len}" if len != RbNaCl::PublicKey::BYTES
-  #raise "Failed to read full public key" if client_eph_pk.nil? || raw_key.bytesize != len
-  #raise "Rejected all-zero public key" if raw_key == ("\x00" * 32)
-
-    # create an object with the received bytes (client's ephimeral public key)
-    # guarantees the key is a proper object and handled safely
-  #  begin
-  #    client_eph_pk = RbNaCl::PublicKey.new(raw_key)
-  #  rescue RbNaCl::LengthError => e
-  #    raise "Invalid public key: #{e.message}"
-  #  end
-
-  #client_eph_pk
-  #end
-
-
 
 end

@@ -7,6 +7,7 @@ require 'concurrent-ruby'
 require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
+require 'sqlite3'
 
 # METHODS
 # hello_back_payload_builder
@@ -20,7 +21,12 @@ require 'pry-byebug'
 # shutdown
   # safe database shutdown
 
-
+DB_FILE = '/home/kali/schat_db/schat.db'
+HOST_KEYS = 'host_keys'
+EPH_HOST_KEYS = 'host_ephemeral_keys'
+CLIENTS_INFO = 'clients_pub_keys'
+CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
+NONCES = 'nonces'
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -62,10 +68,16 @@ class SecureServer
     end
 
     # 3) Remaining bytes are the nonce
-    client_nonce = read_exact(blob, offset, 24)
+    client_nonce = read_exact(blob, offset, 15)
+
+#    begin
+#      db.execute("INSERT INTO #{NONCES} (nonce) VALUES (?)", [client_nonce])
+#    rescue SQLite3::ConstraintException
+#      raise ProtocolError, "Replay detected"
+#    end
 
     # Optional sanity check
-    unless client_nonce.bytesize == RbNaCl::Box.nonce_bytes
+    unless client_nonce.bytesize == 15
       raise IOError, "Invalid nonce size: #{nonce.bytesize}"
     end
     client_nonce
@@ -75,19 +87,22 @@ class SecureServer
   # handles a single client 
   def handle_client(sock)
 
+#    DB = SQLite3::Database.new(DB_FILE)
+#    DB.results_as_hash = true
+
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-
     # receive client's first protocol connection: just a nonce "client hello"
     puts "receive client's nonce"
     client_nonce = receive_hello(sock)
 
     # creates the server_nonce
-    server_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    server_nonce = RbNaCl::Random.random_bytes(15)
     
     # create a signature only valid for that nonce
     signature = sig_builder(client_nonce, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)
+
     # create the payload to be sent together with the signature in order
     # for the client to verify the server's authenticity 
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)    
@@ -107,34 +122,11 @@ class SecureServer
     client_info = peer_identity_verification(server_nonce, protocol_start, client_hello_back_payload, "client", MSG_CLIENT_HELLO_ID2)
 
     client_pk = client_info[:remote_pk]
+    
     client_eph_pk = client_info[:remote_eph_pk]    
 
-    # assign client's public key, ephemeral public key and signature
-            
-    puts "start kex sending"
-    # Send public signing key and ephemeral key (kex)
-    send_kex(sock, @host_pk, eph_pk, sig, nonce)
-
-    # Receive host pub, server eph pub, signature
-    puts "start kex receiving"
-    keys = receive_and_check(sock)
-
-    # kex_confirmation_sender(sock)
-    
-    puts "kex received"
-    client_pk = keys[:public_key]
-    client_eph_pk = keys[:ephemeral_key]
-    client_sig = keys[:sig]
-    # call function to create the key materials
-    # obtain encription and mac keys from the key material
-
     server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
-    message = read_blob(sock)
-    plaintext = server_box.decrypt(nonce, message)
-    puts "#{plaintext}"
-    
-    sock.write("OK")
-    sock.close
+    {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_ehp_pk: client_epk_pk, client_pk: client_pk}
   end
 
 				
@@ -171,7 +163,16 @@ class SecureServer
         @pool.post do
         puts "New thread opened"
           begin
-            self.handle_client(client)
+          handshake_info  = self.handle_client(client)
+          box = handshake_info[:box]
+          client_pk = handshake_info[:client_pk]
+          client_eph_pk = handshake_info[:client_eph_pk]
+          client_nonce = handshake_info[:client_nonce]
+          server_nonce = handshake_info[:server_nonce]
+          
+          nonce_session = Session.new("server", server_nonce)
+          send_nonce = nonce_session.next_nonce
+          ciphertext = box.box(send_nonce, message)                        
           rescue StandardError => e
             begin
               client.write "connection failed: #{e.message}"

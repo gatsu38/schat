@@ -50,7 +50,7 @@ class SecureClient
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
 
     # create the nonce used to validate the session
-    opening_nonce = RbNaCl::Random.random_bytes(RbNaCl::Box.nonce_bytes)
+    opening_nonce = RbNaCl::Random.random_bytes(15)
 
     # create the opening message for client hello    
     opening_message = 
@@ -83,9 +83,6 @@ class SecureClient
     # send the hello back to the server, completing this way the hello protocol
     write_all(sock, hello_back_payload, true)
 
-    # Send public signing key and ephemeral key (kex)
-    puts "sending kex"
-    send_kex(sock, @host_pk, eph_pk, sig, nonce)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
     ciphertext = client_box.encrypt(nonce, msg)
     write_all(sock, ciphertext)

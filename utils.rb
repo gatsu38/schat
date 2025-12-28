@@ -1,7 +1,15 @@
 # reading and writing functions
 # as well as checks
 
-#LIST OF FUNCTIONS:
+
+
+#LIST OF FUNCTIONS and classes:
+# session class
+  # nonce_builder
+    # build the nonce to be used in each message nonce + counter
+  # next_nonce
+    # method to be called each time a new message has to be sent
+#------        
 # hello_back_payload_builder
   # build the hello back
 # peer identity verification
@@ -16,13 +24,6 @@
   # function to receive public key, ephimeral key and signature
 # digest_confirmation
   # send back a hash of the blob to confirm arrival                     
-# kex_parser
-  # parse the blob to obtain the kex
-# handshake_check
-  # function to check the validity of the keys and signature
-# !!! send_kex
-  # !!! this function is used to send the public and ephemeral keys                          
-# !!! confirm_kex_arrived
 # read_socket
   # method to safely read the TCP socket
 # read_blob         
@@ -36,6 +37,50 @@ module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
+
+    
+  class Session
+
+    def initialize(role, base_nonce)
+
+       unless identity == "client" || identity == "server"
+        raise ProtocolError, "Invalid identity role"
+       end
+    
+      @role = role              
+      @base_nonce = base_nonce  
+      @counter = 0               
+    end
+
+    # method to be called each time a new message has to be sent
+    def next_nonce
+      raise "counter overflow" if @counter >= (1 << 64)
+
+      nonce = build_nonce(@base_nonce, role_byte, @counter)
+      @counter += 1
+      nonce
+    end
+
+    private
+
+    def build_nonce(base_nonce, role_byte, counter)
+      raise ArgumentError, "base_nonce must be 15 bytes long" unless base_nonce.bytesize == 15
+      raise ArgumentError, "role_byte must fit in 1 byte" unless (0..255).include?(role_byte)
+      raise ArgumentError, "counter must fit in 8 bytes" unless counter >= 0 && counter < (1 << 64)
+
+      nonce =
+        base_nonce +
+        role_byte + 
+        [counter].pack("Q>")
+    end
+
+    def role_byte
+      @role == :client ? "\x01" : "\x02"
+    end
+  end
+
+    
+  
 
   # build the hello back payload
   def hello_back_payload_builder(signature, eph_pk, local_nonce, identity, hello_id)
@@ -95,8 +140,8 @@ MAX_FIELD_SIZE = 1024
     end
 
     # server nonce
-    remote_nonce = read_exact(payload, offset, RbNaCl::Box.nonce_bytes)
-    offset += RbNaCl::Box.nonce_bytes
+    remote_nonce = read_exact(payload, offset, 15)
+    offset += 15
 
     # check if the nonce is non zero
     if remote_nonce.bytes.all? { |b| b == 0 }
@@ -173,26 +218,6 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # function to receive public key, ephimeral key and signature
-  def receive_and_check(sock)
-    raise ArgumentError, "Socket is nil" if sock.nil?
-    
-    returned_blob = read_blob(sock)
-
-    # send back hash of blob
-    digest_confirmation(sock, returned_blob)
-
-    # parse the blob into 4 different contents 
-    keys = kex_parser(returned_blob)
-    rescue IOError, Errno::EPIPE => e
-      warn "Socket read failed: #{e.class} - #e.message}"
-      raise
-    rescue StandardError => e
-      warn "Unexpected error during read_kex: #{e.class} - #{e.message}"
-      raise  
-  end 
-
-
   # send back a hash of the blob to confirm arrival 
   def digest_confirmation(sock, blob)
     raise ArgumentError, "Socket is nil" if sock.nil?
@@ -208,126 +233,6 @@ MAX_FIELD_SIZE = 1024
     write_all(sock, digest)
   end
   
-
-  # parse the blob to obtain the kex
-  def kex_parser(blob)
-    # keys = [:public_key, :ephemeral_pub_key, :sig, :salt]
-    result = []
-    pos = 0 
-    4.times do 
-
-      # raise error if the length header exceeds the size of the blob
-      raise IOError, "Truncated blob (missing length for field #{i})" if pos + 4 > blob_size
-      len = blob.byteslice(pos, 4).unpack1('N')
-      pos += 4
-      # raise error if the field is unreasonably large
-      raise IOError, "Field #{i} too large (#{len} bytes)" if len > MAX_FIELD_SIZE
-      # raise error if the blob is smaller than the declared size
-      raise IOError, "Truncated blob (field #{i})" if pos + len > blob_size
-      payload = blob.byteslice(pos, len)
-      pos += len
-      # raise error if payload is nil or incongruency between payload actual size and declared size
-      raise IOError, "Invalid payload for field #{i}" if payload.nil? || payload.bytesize != len
-      result << payload  
-    end
-    kex = handshake_check(result[0], result[1], result[2], result[3]) 
-  end
-
-
-  # function to check the validity of the keys and signature
-  def handshake_check(pb_key, eph_key, sig, nonce)
-    begin
-      # 1. Validate and construct server public key
-      pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(pb_key)
-      #pk = OpenSSL::PKey::Ed25519.new(pb_key)
-    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
-      raise "Invalid server public key: #{e.message}"
-    end
-
-    begin
-      # 2. Validate and construct ephemeral public key
-      eph_pk = RbNaCl::PublicKey.new(eph_key)
-      #eph_pk = OpenSSL::PKey::X25519.new(eph_key)
-    rescue RbNaCl::LengthError, RbNaCl::CryptoError => e
-      raise "Invalid server ephemeral public key: #{e.message}"
-    end
-
-    begin
-      # 3. Verify signature (server proves it owns the public key)
-      # The signature must be valid for eph_pk using the remote pk      
-      pk.verify(sig, eph_pk.to_bytes)
-    rescue RbNaCl::BadSignatureError
-      raise "Invalid signature: does not match the server public key"
-    end
-
-    begin
-      # check the nonce's validity
-      raise "Missing nonce" if nonce.nil?
-      raise "Invalid nonce length: #{nonce.bytesize}" unless nonce.bytesize == 24
-      raise "Nonce is all zeros" if nonce == ("\x00" * 24)
-      raise "Low-entropy nonce (repeated byte)" if nonce.each_byte.uniq.length == 1
-
-    rescue => e
-      raise "Nonce verification failed: #{e.message}"
-    end
-
-    { public_key: pk, ephemeral_key: eph_pk, sig: sig, nonce: nonce }
-  end
-
-
-  # this function is used to send the public and ephemeral keys 
-  def send_kex(sock, *blobs)
-
-    # check sock not nil
-    raise ArgumentError, "Socket is nil" if sock.nil?
-    begin
-
-      # check blob content not nil
-      raise ArgumentError, "Kex argument missing" if blobs.nil? || blobs.empty?
-
-      payload = +""
-
-      blobs.each do |data|
-        unless data.is_a?(string)
-          raise TypeError, "Expected Raw bytes (string), got #{data.class}"
-        end
-        
-        data = data.b
-      payload << [data.bytesize].pack("N")
-      payload << data
-      end  
-
-      # create a digest of the whole payload less the total size header
-      digest = RbNaCl::Hash.sha256(payload)
-
-      # send the full_payload        
-      write_all(sock, payload)
-      confirm_kex_arrived(sock, digest)
-
-
-    # rescue clause 
-    rescue IOError, Errno::EPIPE => e
-      warn "Socket write failed: #{e.class} - #{e.message}"
-      raise
-    rescue StandardError => e
-      warn "Unexpected error during send_keys: #{e.class} - #{e.message}"
-      raise
-    end
-  end
-
-  # obtain a hash of the blob (kex) and confirm it arrived
-  def confirm_kex_arrived(sock, digest)
-    confirmation = read_blob(sock)
-      if confirmation == digest
-
-        puts "Kex sent and received"
-        return true
-      else
-        puts "Kex receival non confirmed"
-        raise "Kex receival non confirmed"
-      end
-  end
-
   # method to safely read the TCP socket
   def read_socket(sock, n, timeout)
     buf = +""
@@ -448,3 +353,4 @@ MAX_FIELD_SIZE = 1024
   end
 
 end
+

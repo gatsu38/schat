@@ -2,44 +2,100 @@
 require 'sqlite3'
 require 'rbnacl'
 
-DB_FILE = '~/schat.db'
-TABLE_NAME = 'host_keys.db'
-
-if File.exists?(DB_FILE)
-  puts "Database already exists. Exiting"
-  exit
-end
+DB_FILE = '/home/kali/schat_db/schat.db'
+HOST_KEYS = 'host_keys'
+EPH_HOST_KEYS = 'host_ephemeral_keys'
+CLIENTS_INFO = 'clients_pub_keys'
+CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
+NONCES = 'nonces'
+VOUCHERS = 'vouchers'
+#if File.exist?(DB_FILE)
+#  puts "Database already exists. Exiting"
+#  exit
+#end
 
 db = SQLite3::Database.new(DB_FILE)
 
 db.execute <<-SQL
-  CREATE TABLE IF NOT EXIST #{TABLE_NAME} (
+  CREATE TABLE IF NOT EXISTS #{CLIENTS_INFO} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    private_key BLOB NOT NULL,
+    username TEXT NOT NULL UNIQUE,
     public_key BLOB NOT NULL,
-    created_at DATETIME DEFAULT CURRENT TIMESTAMP  
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL
 
-puts "table #{TABLE_NAME} ready"
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{CLIENTS_PUB_EPHEMERAL_KEYS} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ephemeral_public_key BLOB NOT NULL,
+    public_key BLOB NOT NULL,
+    client_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (client_id)
+      REFERENCES clients_info(id)
+      ON DELETE CASCADE
+  );
+SQL
+
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{NONCES} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nonce BLOB NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+SQL
+
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{VOUCHERS} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    voucher BLOB NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    used_ad DATETIME
+  );
+SQL
+
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{HOST_KEYS} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    private_key BLOB NOT NULL,
+    public_key BLOB NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP  
+  );
+SQL
+
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{EPH_HOST_KEYS} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ephemeral_private_key BLOB NOT NULL,
+    ephemeral_public_key BLOB NOT NULL,
+    create_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+SQL
+
+    
+
+puts "table #{HOST_KEYS} ready"
+puts "table #{EPH_HOST_KEYS} ready"
 
 host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
 host_pk = host_sk.verify_key
 
 # insert private and public key inside the database
-db.execute(INSERT INTO #{TABLE_NAME} (private_key, public_key) VALUES (?, ?)", [host_sk.to_bytes, host_pk.to_bytes])
+db.execute("INSERT INTO #{HOST_KEYS} (private_key, public_key) VALUES (?, ?)", [host_sk.to_bytes, host_pk.to_bytes])
 
 # protect database with user password
 # !!!!! ADD EXTRA PROTECTION IN THIS PHASE????
 # !!!!! ADD PASSWORD MINIMUM SECURITY
-puts "enter password to protect the database"
-user_password = STDIN.noecho(&:gets).chomp
+#puts "enter password to protect the database"
+#user_password = STDIN.noecho(&:gets).chomp
 
 # !!!!! ADD PROTECTION
-password_key = Digest::SHA256.digest(user_password)
+#password_key = Digest::SHA256.digest(user_password)
 
-tpm_key = tpm_function
+#tpm_key = tpm_function
 
-master_key_bytes = password_key.bytes.zip(tpm_key.bytes).map { |a,b| (a ^ b).chr }.join
-mater_key = RbNaCl::SecretBox.new(master_key_bytes)
+#master_key_bytes = password_key.bytes.zip(tpm_key.bytes).map { |a,b| (a ^ b).chr }.join
+#mater_key = RbNaCl::SecretBox.new(master_key_bytes)
 db.close

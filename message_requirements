@@ -1,0 +1,3 @@
+unique nonce per message (reuse the one in the handshake)
+incorporate sequence counter in the nonce
+key expiration is separated

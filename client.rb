@@ -10,7 +10,7 @@ require 'pry-byebug'
 # LIST OF FUNCTIONS
 # server_identity_verification
   # !! verify server identity and connection genuinity !! add server pub key check
-# main method for client
+# hello_server method for client
   # initialize the connection with the server
 
 PROTOCOL_NAME = "myproto-v1"
@@ -34,7 +34,7 @@ class SecureClient
 
 
   # main method
-  def main(msg)
+  def hello_server(msg)
     
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
@@ -60,11 +60,11 @@ class SecureClient
 
     # send the first nonce to the server "client hello"
     puts "send opening nonce"
-    write_all(sock, opening_message, true)
+    write_all(sock, opening_message)
 
     # receive the signature and what's needed to verify it 
     puts "waiting for server signature"
-    server_hello_back_payload = read_blob(sock)
+    server_hello_back_payload = read_blob(sock, timeout: 10)
     # verify server identity and obtain keys + nonce
     server_info = peer_identity_verification(opening_nonce, protocol_start, server_hello_back_payload, "server", MSG_SERVER_HELLO_ID)
 
@@ -81,16 +81,13 @@ class SecureClient
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, opening_nonce, "client", MSG_CLIENT_HELLO_ID2)
 
     # send the hello back to the server, completing this way the hello protocol
-    write_all(sock, hello_back_payload, true)
-
+    write_all(sock, hello_back_payload)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
-    ciphertext = client_box.encrypt(nonce, msg)
-    write_all(sock, ciphertext)
-    puts "hi"        
+    {client_nonce: opening_nonce, server_nonce: server_nonce, client_box: client_box, server_eph_pk: server_eph_pk, server_pk: server_pk}
 
-    sock.close
   end
 
+  # ask the server if there's new messages 
   def check_messages
     
   end
@@ -112,4 +109,4 @@ end
 client = SecureClient.new("127.0.0.1", 2222)
 print "Message: "
 msg = STDIN.gets.strip
-client.main(msg)
+client.hello_server(msg)

@@ -14,8 +14,8 @@ require 'sqlite3'
   # build the hello back payload
 # receive_hello
   # used to receive the hello message from client containing the client nonce
-# handle_client
-  # handles a single client, the main method
+# hello_client
+  # executes the hello client protocol, after this a secret is shared
 # run
   # spawns a new thread for each new client connection
 # shutdown
@@ -43,7 +43,7 @@ class SecureServer
   # usfed to receive the hello message from client   
   def receive_hello(sock)
     puts "receive hello nonce"
-    blob = read_blob(sock)
+    blob = read_blob(sock, timeout: 10)
     raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 24
     offset = 0
 
@@ -85,7 +85,7 @@ class SecureServer
 
 
   # handles a single client 
-  def handle_client(sock)
+  def hello_client(sock)
 
 #    DB = SQLite3::Database.new(DB_FILE)
 #    DB.results_as_hash = true
@@ -109,11 +109,11 @@ class SecureServer
 
     # send the hello back containing the signature and the server nonce among other
     puts "send hello back"
-    write_all(sock, hello_back_payload, true)
+    write_all(sock, hello_back_payload)
 
     # receive the signature and what's required to verify it
     puts "waiting for the client's signature"
-    client_hello_back_payload = read_blob(sock)
+    client_hello_back_payload = read_blob(sock, timeout: 10)
 
     # create the protocol name + padding
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
@@ -146,6 +146,19 @@ class SecureServer
     @host_pk = @host_sk.verify_key
   end  
 
+  def handle_client()
+          box = handshake_info[:box]
+          client_pk = handshake_info[:client_pk]
+          client_eph_pk = handshake_info[:client_eph_pk]
+          client_nonce = handshake_info[:client_nonce]
+          server_nonce = handshake_info[:server_nonce]
+
+          nonce_session = Session.new("server", server_nonce)
+          send_nonce = nonce_session.next_nonce
+          ciphertext = box.box(send_nonce, message)
+
+  end
+
 
   # handles the incoming connections 
   # spawns a new thread for each new client connection
@@ -163,16 +176,9 @@ class SecureServer
         @pool.post do
         puts "New thread opened"
           begin
-          handshake_info  = self.handle_client(client)
-          box = handshake_info[:box]
-          client_pk = handshake_info[:client_pk]
-          client_eph_pk = handshake_info[:client_eph_pk]
-          client_nonce = handshake_info[:client_nonce]
-          server_nonce = handshake_info[:server_nonce]
-          
-          nonce_session = Session.new("server", server_nonce)
-          send_nonce = nonce_session.next_nonce
-          ciphertext = box.box(send_nonce, message)                        
+            handshake_info  = self.hello_client(client)
+            handle_client(handshake_info)
+
           rescue StandardError => e
             begin
               client.write "connection failed: #{e.message}"

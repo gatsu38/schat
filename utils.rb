@@ -253,7 +253,25 @@ MAX_FIELD_SIZE = 1024
   
 
   # function to obtain the full content of the socket
-  def read_blob(sock, timeout: 10, max_attempts:5)
+  def read_blob(sock, timeout: nil, max_attempts:5)
+
+  # this timeout is used while listening after the handshake
+  if timeout.nil?
+    # blocking read, no timeout or retries
+    header = sock.read(4)
+    raise EOFError, "Connection closed" if header.nil? || header.bytesize < 4
+
+    payload_len = header.unpack1("N")
+    raise BlobSizeError, "Invalid payload length" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
+
+    payload = sock.read(payload_len)
+    raise EOFError, "Connection closed while reading payload" if payload.nil? || payload.bytesize != payload_len
+
+    return payload
+
+  # this timeout is used during the handshake  
+  else
+
     attempts = 0
     
     begin
@@ -266,11 +284,6 @@ MAX_FIELD_SIZE = 1024
       payload_len = header.unpack1("N")  # unpack1 gives an integer directly
       raise BlobSizeError, "Invalid blob size: #{payload_len}" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
 
-      flag_in = read_socket(sock, 1, timeout)
-      unless ["\x01", "\x02"].include?(flag_in)
-        raise IOError, "Invalid flag value: #{flag.inspect}"
-      end
-
       # read payload (exactly blob_len bytes) blob will contain the payload
       payload = read_socket(sock, payload_len, timeout)
 
@@ -279,11 +292,6 @@ MAX_FIELD_SIZE = 1024
         raise IOError, "payload length mismatch: expected size: #{header.unpack1("N")}, obtained: #{payload.size}"
       end
 
-      # send digest confirmation
-      if flag_in == "\x01"
-        digest = RbNaCl::Hash.sha256(payload)
-        write_all(sock, digest, false)
-      end
 
       # return the payload
       payload
@@ -301,18 +309,14 @@ MAX_FIELD_SIZE = 1024
 
 
   # helper method to ensure full_write on the remote socket
-  def write_all(sock, payload, confirmation_flag, timeout: 10, max_attempts: 5)
+  def write_all(sock, payload, timeout: 10, max_attempts: 5)
 
-  flag = confirmation_flag ? "\x01" : "\x02"
 
     # prefix the payload with the whole size of the payload
     data =
       [payload.bytesize].pack("N") +
-      flag +
       payload
 
-    expected_digest = RbNaCl::Hash.sha256(payload)
-  
     total_written_on_sock = 0
     attempts_on_sock = 0
     attempts_on_wire = 0 
@@ -333,19 +337,6 @@ MAX_FIELD_SIZE = 1024
       IO.select(nil, [sock], nil, timeout)
         raise IOError, "Socket not writable within timeout"      
       retry
-    end
-
-    # expect digest from peer
-    return true unless confirmation_flag
-
-    digest_blob = read_blob(sock)
-
-    unless digest_blob.bytesize == 32
-      raise IOError, "Invalid digest size: #{digest_blob.bytesize}"
-    end
-
-    unless digest_blob == expected_digest
-      raise SecurityError, "Digest mismatch (integrity check failed)"
     end
 
     true

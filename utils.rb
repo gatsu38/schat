@@ -38,12 +38,12 @@ module Utils
 MAX_BLOB_SIZE = 16 * 1024 * 1024
 MAX_FIELD_SIZE = 1024
 
-    
+  # Used to create a valid and unique nonce to be passed to the box
+  # the nonce will include a counter that increases with each message sent
   class Session
 
     def initialize(role, base_nonce)
-
-       unless identity == "client" || identity == "server"
+       unless role == "client" || role == "server"
         raise ProtocolError, "Invalid identity role"
        end
     
@@ -53,10 +53,10 @@ MAX_FIELD_SIZE = 1024
     end
 
     # method to be called each time a new message has to be sent
-    def next_nonce
+    def next_nonce()
       raise "counter overflow" if @counter >= (1 << 64)
 
-      nonce = build_nonce(@base_nonce, role_byte, @counter)
+      nonce = build_nonce(@base_nonce, @role, @counter)
       @counter += 1
       nonce
     end
@@ -253,58 +253,26 @@ MAX_FIELD_SIZE = 1024
   
 
   # function to obtain the full content of the socket
-  def read_blob(sock, timeout: nil, max_attempts:5)
+  def read_blob(sock, timeout: 10, max_attempts:5)
 
-  # this timeout is used while listening after the handshake
-  if timeout.nil?
-    # blocking read, no timeout or retries
-    header = sock.read(4)
-    raise EOFError, "Connection closed" if header.nil? || header.bytesize < 4
+    # obtain header
+    header = read_socket(sock, 4, timeout)
 
-    payload_len = header.unpack1("N")
-    raise BlobSizeError, "Invalid payload length" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
+    # sanity check for payload length
+    payload_len = header.unpack1("N")  # unpack1 gives an integer directly
+    raise BlobSizeError, "Invalid blob size: #{payload_len}" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
 
-    payload = sock.read(payload_len)
-    raise EOFError, "Connection closed while reading payload" if payload.nil? || payload.bytesize != payload_len
+    # read payload (exactly blob_len bytes) blob will contain the payload
+    payload = read_socket(sock, payload_len, timeout)
 
-    return payload
-
-  # this timeout is used during the handshake  
-  else
-
-    attempts = 0
-    
-    begin
-      attempts += 1
-
-      # obtain header
-      header = read_socket(sock, 4, timeout)
-
-      # sanity check for payload length
-      payload_len = header.unpack1("N")  # unpack1 gives an integer directly
-      raise BlobSizeError, "Invalid blob size: #{payload_len}" if payload_len < 0 || payload_len > MAX_BLOB_SIZE
-
-      # read payload (exactly blob_len bytes) blob will contain the payload
-      payload = read_socket(sock, payload_len, timeout)
-
-      # make sure the full blob has been sent with the exact size
-      unless payload.bytesize == payload_len
-        raise IOError, "payload length mismatch: expected size: #{header.unpack1("N")}, obtained: #{payload.size}"
-      end
-
-
-      # return the payload
-      payload
-
-    rescue Timeout::Error, EOFError, BlobSizeError => e
-      if attempts < max_attempts
-        puts "Attempt #{attempts} failed: #{e.message}. Retrying..."
-        retry
-      else
-        puts "All #{max_attempts} attempts failed."
-        raise
-      end
+    # make sure the full blob has been sent with the exact size
+    unless payload.bytesize == payload_len
+      raise IOError, "payload length mismatch: expected size: #{header.unpack1("N")}, obtained: #{payload.size}"
     end
+
+
+    # return the payload
+    payload
   end
 
 

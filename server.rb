@@ -32,6 +32,8 @@ MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
+MSG_CLIENT_REGISTRATION = "\x04"
+MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -43,8 +45,8 @@ class SecureServer
   # usfed to receive the hello message from client   
   def receive_hello(sock)
     puts "receive hello nonce"
-    blob = read_blob(sock, timeout: 10)
-    raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 24
+    blob = read_blob(sock)
+    raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 15
     offset = 0
 
     # 1) Read protocol name
@@ -89,7 +91,6 @@ class SecureServer
 
 #    DB = SQLite3::Database.new(DB_FILE)
 #    DB.results_as_hash = true
-
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
@@ -113,7 +114,7 @@ class SecureServer
 
     # receive the signature and what's required to verify it
     puts "waiting for the client's signature"
-    client_hello_back_payload = read_blob(sock, timeout: 10)
+    client_hello_back_payload = read_blob(sock)
 
     # create the protocol name + padding
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
@@ -126,10 +127,14 @@ class SecureServer
     client_eph_pk = client_info[:remote_eph_pk]    
 
     server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
-    {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_ehp_pk: client_epk_pk, client_pk: client_pk}
+    {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
   end
 
-				
+  # unbox the message and properly 
+  def message_handler(sock, box)
+    
+	  
+	end			
 
   # create a Ed25519 private key (signing key)
   # used to sign the server's ephimeral public key
@@ -146,42 +151,61 @@ class SecureServer
     @host_pk = @host_sk.verify_key
   end  
 
-  def handle_client()
-          box = handshake_info[:box]
-          client_pk = handshake_info[:client_pk]
-          client_eph_pk = handshake_info[:client_eph_pk]
-          client_nonce = handshake_info[:client_nonce]
-          server_nonce = handshake_info[:server_nonce]
+  # this method is used to handle all the messages received from a single client after hello
+  def handle_client(handshake_info, sock)
 
-          nonce_session = Session.new("server", server_nonce)
-          send_nonce = nonce_session.next_nonce
-          ciphertext = box.box(send_nonce, message)
+    server_nonce = handshake_info[:server_nonce]
+    client_nonce = handshake_info[:client_nonce]
+    binding.pry
+    # create a nonce to be sent with each package
+    nonce_session = Session.new("server", server_nonce)
+    send_nonce = nonce_session.next_nonce
 
+    # extract all the handshake_info
+    #     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_ehp_pk: client_epk_pk, client_pk: client_p>
+    box = handshake_info[server_box:]
+    client_eph_pk = handshake_info[client_eph_pk:]
+    client_pk = handshake_info[client_pk:]
+    
+    loop do
+      begin
+        blob = read_blob(sock)                    
+        message_handler(blob, box)
+      rescue Timeout::Error
+        next
+      rescue EOFError
+        break
+      rescue StandardError => e
+        puts "Error during message reception: #{e.message}"
+        break
+      end
+    end
   end
-
 
   # handles the incoming connections 
   # spawns a new thread for each new client connection
   def run
     begin
-    server = TCPServer.new(@port)
+    tcp_server = TCPServer.new(@port)
     puts "Server listening on port #{@port}"
 
       loop do
         # client is the tcp connection 
         puts "ready to accept new connection"
-        client = server.accept
+        sock = tcp_server.accept
         puts "new connection accepted"
         # Submit the client handling job to the pool
         @pool.post do
         puts "New thread opened"
           begin
-            handshake_info  = self.hello_client(client)
-            handle_client(handshake_info)
-
+            # First: the handshake with the client
+            handshake_info  = self.hello_client(sock)
+            # Second: a method that constantly listens for incoming messages from the client
+            handle_client(handshake_info, sock)
+            
           rescue StandardError => e
             begin
-              client.write "connection failed: #{e.message}"
+              sock.write "connection failed: #{e.message}"
             rescue => send_error
               puts "failed to send error to the client: #{send_error.message}"
             end
@@ -189,7 +213,7 @@ class SecureServer
             puts e.backtrace.join("\n")
           ensure
             begin
-              client.close
+              sock.close
             rescue StandardError => close_error
               puts "Failed to close the client: #{close_error.message}"
             end  
@@ -197,18 +221,18 @@ class SecureServer
         end
       end
     ensure
-      self.shutdown(server) if server
+      self.shutdown(tcp_server) if tcp_server
     end
   end
 
   # safe database shutdown
-  def shutdown(server)
+  def shutdown(tcp_server)
     begin
       puts "\nShutting down server..."
 
       # Try to close the TCP server socket
       begin
-        server.close
+        tcp_server.close
         puts "Server socket closed."
       rescue => e
         puts "Warning: failed to close server socket - #{e.class}: #{e.message}"
@@ -236,6 +260,58 @@ class SecureServer
 
 end
 
+# generate vouchers to be used by clients to register
+def generate_vouchers()
+  n = nil
+  puts "Choose how many vouchers to generate (1-100): "
+  loop do
+    input = STDIN.gets&.chomp
+
+    next  unless input =~ /\A\d+\z/
+
+    n = input.to_i
+    break if n.between?(1, 100)
+    puts "Number of vouchers to generate too high"
+  end
+
+  db = SQLite3::Database.new(DB_FILE)
+  db.results_as_hash = true
+  
+  row = db.get_first_row(<<-SQL)
+    SELECT COUNT(*) AS count
+    FROM vouchers
+    WHERE used_at IS NULL;
+  SQL
+
+  unused_count = row["count"]
+
+  insert_stmt = db.prepare <<-SQL
+    INSERT INTO vouchers (voucher) VALUES (?);
+  SQL
+  
+  puts "Unused vouchers already in DB: #{unused_count}"
+  puts "Generating #{n} random vouchers"
+  n.times do
+    seed = RbNaCl::Random.random_bytes(32)
+    seed_hash = RbNaCl::Hash.sha256(seed)
+    voucher = seed_hash.unpack("H*")[0, 30]
+
+    begin
+      insert_stmt.execute(voucher)
+    rescue SQLite3::ConstrainException
+      retry
+    end
+  end
+  insert_stmt.close
+  puts "New vouchers issued"
+
+ensure
+  db&.close  
+end
+
+
+
 # non necessariamente instanziabile
+# generate_vouchers()
 SecureServer.new(2222).run
 

@@ -5,7 +5,7 @@ require 'rbnacl'
 DB_FILE = '/home/kali/schat_db/schat.db'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
-CLIENTS_INFO = 'clients_pub_keys'
+CLIENTS_INFO = 'clients_info'
 CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
 NONCES = 'nonces'
 VOUCHERS = 'vouchers'
@@ -19,8 +19,11 @@ db = SQLite3::Database.new(DB_FILE)
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{CLIENTS_INFO} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    public_key BLOB NOT NULL,
+    username TEXT NOT NULL UNIQUE CHECK (
+        length(username) <= 20 AND
+        username GLOB '[A-Za-z0-9]*'
+      ),
+    public_key BLOB NOT NULL CHECK (length(public_key) = 32),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL
@@ -28,8 +31,7 @@ SQL
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{CLIENTS_PUB_EPHEMERAL_KEYS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ephemeral_public_key BLOB NOT NULL,
-    public_key BLOB NOT NULL,
+    ephemeral_public_key BLOB NOT NULL CHECK (length(ephemeral_public_key) = 32),
     client_id INTEGER NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
@@ -42,7 +44,7 @@ SQL
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{NONCES} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nonce BLOB NOT NULL UNIQUE,
+    nonce BLOB NOT NULL UNIQUE CHECK (length(nonce) = 15),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL
@@ -52,15 +54,15 @@ db.execute <<-SQL
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     voucher BLOB NOT NULL UNIQUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    used_ad DATETIME
+    used_at DATETIME
   );
 SQL
 
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{HOST_KEYS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    private_key BLOB NOT NULL,
-    public_key BLOB NOT NULL,
+    private_key BLOB NOT NULL UNIQUE CHECK (length(private_key) = 32),
+    public_key BLOB NOT NULL CHECK (length(public_key) = 32),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP  
   );
 SQL
@@ -68,8 +70,8 @@ SQL
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{EPH_HOST_KEYS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ephemeral_private_key BLOB NOT NULL,
-    ephemeral_public_key BLOB NOT NULL,
+    ephemeral_private_key BLOB NOT NULL CHECK (length(ephemeral_private_key) = 32),
+    ephemeral_public_key BLOB NOT NULL CHECK (length(ephemeral_public_key) = 32),
     create_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL

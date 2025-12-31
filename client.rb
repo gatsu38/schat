@@ -18,12 +18,13 @@ MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
+MSG_CLIENT_REGISTRATION = "\x04"
+MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
 class ProtocolError < StandardError; end
 
 class SecureClient
 
   include Utils
-
 
   def initialize(host, port)
     @host, @port = host, port
@@ -39,7 +40,7 @@ class SecureClient
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-
+  
     puts "created: ephemeral private key, public key and signature"
 
     # establish a connection with the server
@@ -50,41 +51,39 @@ class SecureClient
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
 
     # create the nonce used to validate the session
-    opening_nonce = RbNaCl::Random.random_bytes(15)
+    client_nonce = RbNaCl::Random.random_bytes(15)
 
     # create the opening message for client hello    
     opening_message = 
       protocol_start +
       MSG_CLIENT_HELLO_ID + 
-      opening_nonce
+      client_nonce
 
     # send the first nonce to the server "client hello"
-    puts "send opening nonce"
+    puts "send opening nonce"  
     write_all(sock, opening_message)
 
     # receive the signature and what's needed to verify it 
     puts "waiting for server signature"
-    server_hello_back_payload = read_blob(sock, timeout: 10)
+    server_hello_back_payload = read_blob(sock)
     # verify server identity and obtain keys + nonce
-    server_info = peer_identity_verification(opening_nonce, protocol_start, server_hello_back_payload, "server", MSG_SERVER_HELLO_ID)
-
+    server_info = peer_identity_verification(client_nonce, protocol_start, server_hello_back_payload, "server", MSG_SERVER_HELLO_ID)
     # assign server's public key, ephemeral public key and signature
     server_pk = server_info[:remote_pk]
-    server_eph_pk = server_info[:remote_eph_key]
+    server_eph_pk = server_info[:remote_eph_pk]
     server_nonce = server_info[:remote_nonce]
 
     # create a signature only valid for these nonces
-    signature = sig_builder(server_nonce, eph_pk, opening_nonce, "client", MSG_CLIENT_HELLO_ID2)
+    signature = sig_builder(server_nonce, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
 
     # create the payload to be sent together with the signature in order
     # for the server to verify the client's authenticity
-    hello_back_payload = hello_back_payload_builder(signature, eph_pk, opening_nonce, "client", MSG_CLIENT_HELLO_ID2)
+    hello_back_payload = hello_back_payload_builder(signature, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
 
     # send the hello back to the server, completing this way the hello protocol
     write_all(sock, hello_back_payload)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
-    {client_nonce: opening_nonce, server_nonce: server_nonce, client_box: client_box, server_eph_pk: server_eph_pk, server_pk: server_pk}
-
+    {client_nonce: client_nonce, server_nonce: server_nonce, client_box: client_box, server_eph_pk: server_eph_pk, server_pk: server_pk, sock: sock}
   end
 
   # ask the server if there's new messages 
@@ -95,18 +94,68 @@ class SecureClient
   # inside the contact_list there must be a new contact option and the list of available chats
   # the existing contacts must have a unique check in case of a new message 
   def contact_list
-    
+        
   end
 
-  def registration(sock)
-    puts "Choose a nickname: "
+  # ask the user to provide a valid voucher and also recover the nickname from the db
+  def registration(handshake_info, nonce)
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    nickname = db.get_first_row(<<-SQL)
+      SELECT username FROM user;
+    SQL
     
-    send_registration(sock, nickname, eph_pk, password, eph_pk_array)
+    puts "Insert a valid voucher:"
+    voucher = STDIN.gets.strip
+    payload = registration_builder(nickname, voucher) 
+    ciphertext = registration_box.box(nonce, payload)   
+  end
+
+  # build the registration message
+  def registration_builder(nickname, voucher)
+    raise ArgumentError, "Nickname too long" if nickname.bytesize > 20
+
+    registration_payload = 
+      MSG_CLIENT_REGISTRATION +
+      [nickname.bytesize].pack("C") +
+      nickname +
+      voucher
+
+    registration_payload      
+  end
+
+  # this method is used to cip
+  
+  
+
+  # used to generate, check and update the ephemeral_keys 
+  def ephemeral_keys_update(handshake_info)
+    
   end
 
 end
 
-client = SecureClient.new("127.0.0.1", 2222)
-print "Message: "
-msg = STDIN.gets.strip
-client.hello_server(msg)
+def main
+include Utils
+  puts "Schat. SecureChat client v1.0"
+  puts "Choose an option:"
+  puts "1) Register"
+  puts "2) Check contact list"
+  puts "3) Send message"
+  puts "4) Get messages"
+  choice = STDIN.gets.strip
+  client = SecureClient.new("127.0.0.1", 2222)
+  
+  # inside handshake info there is all the info concerning the connection:
+  # keys, nonces, box and socket
+  handshake_info = client.hello_server(choice)
+  new_nonce = Session.new("server", handshake_info[:client_nonce])
+  client.registration(handshake_info, new_nonce)
+
+  new_nonce = nonce_session.next_nonce
+  
+  client.ephemeral_keys_update(handshake_info)
+end
+main

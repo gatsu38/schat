@@ -16,11 +16,12 @@ require 'sqlite3'
   # used to receive the hello message from client containing the client nonce
 # hello_client
   # executes the hello client protocol, after this a secret is shared
+# decipher
+  # deciphers the received message
 # run
   # spawns a new thread for each new client connection
 # shutdown
   # safe database shutdown
-
 DB_FILE = '/home/kali/schat_db/schat.db'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
@@ -130,9 +131,10 @@ class SecureServer
     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
   end
 
-  # unbox the message and properly 
-  # add errors 
+  # unbox the messages
   def decipher(blob, box)
+
+    blob_size = blob.bytesize
     offset = 0
     nonce = read_exact(blob, offset, 24)
     offset += 24
@@ -140,11 +142,19 @@ class SecureServer
     cipher_header = read_exact(blob, offset, 4)
     cipher_size = cipher_header.unpack1("N")
     offset += 4
-    
-    cipher = read_exact(blob, offset, cipher_size)        
+
     binding.pry
-    plain_text = box.open(nonce, cipher)     	  
+    raise BlobSizeError, "Invalid blob size: #{cipher_size}" if cipher_size < 0 || cipher_size > MAX_BLOB_SIZE
+    raise BlobSizeError, "Mismatch between declared cipher size and received package size" if cipher_size != blob_size - 24 - 4
+    cipher = read_exact(blob, offset, cipher_size)
+    plain_text = box.open(nonce, cipher)   	  
+    plain_text
 	end			
+
+  # extract the message id and call the proper handler
+	def message_caller(message)
+
+	end
 
   # create a Ed25519 private key (signing key)
   # used to sign the server's ephimeral public key
@@ -179,7 +189,8 @@ class SecureServer
     loop do
       begin
         blob = read_blob(sock)                    
-        decipher(blob, box)
+        message = decipher(blob, box)
+        message_caller(message)
       rescue Timeout::Error
         next
       rescue EOFError

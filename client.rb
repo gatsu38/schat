@@ -6,6 +6,7 @@ require 'securerandom'
 require_relative 'utils'
 require 'pry'
 require 'pry-byebug'
+require 'sqlite3'
 
 # LIST OF FUNCTIONS
 # server_identity_verification
@@ -13,6 +14,7 @@ require 'pry-byebug'
 # hello_server method for client
   # initialize the connection with the server
 
+DB_FILE = "/home/kali/schat_db/client.db"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -99,18 +101,36 @@ class SecureClient
 
   # ask the user to provide a valid voucher and also recover the nickname from the db
   def registration(handshake_info, nonce)
-
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    nickname = db.get_first_row(<<-SQL)
+    nickname = db.get_first_value(<<-SQL)
       SELECT username FROM user;
     SQL
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
     
     puts "Insert a valid voucher:"
     voucher = STDIN.gets.strip
-    payload = registration_builder(nickname, voucher) 
-    ciphertext = registration_box.box(nonce, payload)   
+    registration_info = registration_builder(nickname, voucher) 
+    ciphertext = safe_box.box(nonce, registration_info)
+
+    payload = 
+      nonce +
+      [ciphertext.bytesize].pack("N") +
+      ciphertext
+
+    write_all(sock, payload)
+    binding.pry
+    confirmation = read_blob(sock)
+
+    if confirmation == true
+      puts "Registration successful"
+    else 
+      puts "Registration failed"
+    end
+    
   end
 
   # build the registration message
@@ -151,7 +171,12 @@ include Utils
   # inside handshake info there is all the info concerning the connection:
   # keys, nonces, box and socket
   handshake_info = client.hello_server(choice)
-  new_nonce = Session.new("server", handshake_info[:client_nonce])
+
+  # create and get the nonce ready
+  nonce_session = Session.new("server", handshake_info[:client_nonce])
+  new_nonce = nonce_session.next_nonce
+
+  # 
   client.registration(handshake_info, new_nonce)
 
   new_nonce = nonce_session.next_nonce

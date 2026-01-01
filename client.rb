@@ -13,7 +13,11 @@ require 'sqlite3'
   # !! verify server identity and connection genuinity !! add server pub key check
 # hello_server method for client
   # initialize the connection with the server
-
+# registration
+  # send registration request with nickname and voucher
+# registration_builder
+  # build the registration package
+  
 DB_FILE = "/home/kali/schat_db/client.db"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
@@ -99,6 +103,23 @@ class SecureClient
         
   end
 
+  # cipher the content, pack it with the nonce, send it, update nonce, wait confirmation
+  def cipher_pack_send_confirm(sock, box, nonce, payload)
+    ciphertext = box.box(nonce, payload)
+
+    payload = 
+      nonce +
+      [ciphertext.bytesize].pack("N") +
+      ciphertext
+
+    binding.pry
+    write_all(sock, payload)
+    next_nonce()
+        
+    
+    confirmation = read_blob(sock)    
+  end
+
   # ask the user to provide a valid voucher and also recover the nickname from the db
   def registration(handshake_info, nonce)
     db = SQLite3::Database.new(DB_FILE)
@@ -113,24 +134,17 @@ class SecureClient
     
     puts "Insert a valid voucher:"
     voucher = STDIN.gets.strip
-    registration_info = registration_builder(nickname, voucher) 
-    ciphertext = safe_box.box(nonce, registration_info)
 
-    payload = 
-      nonce +
-      [ciphertext.bytesize].pack("N") +
-      ciphertext
+    registration_data = registration_builder(nickname, voucher)
 
-    write_all(sock, payload)
-    binding.pry
-    confirmation = read_blob(sock)
+    confirmation = cipher_pack_send_confirm(handshake_info[:sock], handshake_info[:client_box], nonce, registration_data)
 
     if confirmation == true
       puts "Registration successful"
-    else 
+    else
       puts "Registration failed"
     end
-    
+
   end
 
   # build the registration message

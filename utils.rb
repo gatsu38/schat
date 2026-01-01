@@ -46,8 +46,8 @@ MAX_FIELD_SIZE = 1024
        unless role == "client" || role == "server"
         raise ProtocolError, "Invalid identity role"
        end
-    
-      @role = role              
+
+      @role = role == "client" ? "\x01" : "\x02"              
       @base_nonce = base_nonce  
       @counter = 0               
     end
@@ -65,7 +65,7 @@ MAX_FIELD_SIZE = 1024
 
     def build_nonce(base_nonce, role_byte, counter)
       raise ArgumentError, "base_nonce must be 15 bytes long" unless base_nonce.bytesize == 15
-      raise ArgumentError, "role_byte must fit in 1 byte" unless (0..255).include?(role_byte)
+      raise ArgumentError, "role_byte must be 1 byte long" unless role_byte.bytesize == 1
       raise ArgumentError, "counter must fit in 8 bytes" unless counter >= 0 && counter < (1 << 64)
 
       nonce =

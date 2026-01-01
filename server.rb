@@ -131,9 +131,19 @@ class SecureServer
   end
 
   # unbox the message and properly 
-  def message_handler(sock, box)
+  # add errors 
+  def decipher(blob, box)
+    offset = 0
+    nonce = read_exact(blob, offset, 24)
+    offset += 24
     
-	  
+    cipher_header = read_exact(blob, offset, 4)
+    cipher_size = cipher_header.unpack1("N")
+    offset += 4
+    
+    cipher = read_exact(blob, offset, cipher_size)        
+    binding.pry
+    plain_text = box.open(nonce, cipher)     	  
 	end			
 
   # create a Ed25519 private key (signing key)
@@ -156,21 +166,20 @@ class SecureServer
 
     server_nonce = handshake_info[:server_nonce]
     client_nonce = handshake_info[:client_nonce]
-    binding.pry
     # create a nonce to be sent with each package
     nonce_session = Session.new("server", server_nonce)
     send_nonce = nonce_session.next_nonce
 
     # extract all the handshake_info
     #     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_ehp_pk: client_epk_pk, client_pk: client_p>
-    box = handshake_info[server_box:]
-    client_eph_pk = handshake_info[client_eph_pk:]
-    client_pk = handshake_info[client_pk:]
+    box = handshake_info[:server_box]
+    client_eph_pk = handshake_info[:client_eph_pk]
+    client_pk = handshake_info[:client_pk]
     
     loop do
       begin
         blob = read_blob(sock)                    
-        message_handler(blob, box)
+        decipher(blob, box)
       rescue Timeout::Error
         next
       rescue EOFError
@@ -277,13 +286,9 @@ def generate_vouchers()
   db = SQLite3::Database.new(DB_FILE)
   db.results_as_hash = true
   
-  row = db.get_first_row(<<-SQL)
-    SELECT COUNT(*) AS count
-    FROM vouchers
-    WHERE used_at IS NULL;
+  unused_count = db.get_first_value(<<-SQL)
+    SELECT COUNT(*) FROM vouchers WHERE used_at IS NULL;
   SQL
-
-  unused_count = row["count"]
 
   insert_stmt = db.prepare <<-SQL
     INSERT INTO vouchers (voucher) VALUES (?);

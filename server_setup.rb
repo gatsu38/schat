@@ -52,7 +52,7 @@ SQL
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{VOUCHERS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    voucher BLOB NOT NULL UNIQUE,
+    voucher BLOB NOT NULL UNIQUE (length(voucher) = 30),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     used_at DATETIME
   );

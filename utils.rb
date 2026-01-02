@@ -9,7 +9,13 @@
     # build the nonce to be used in each message nonce + counter
   # next_nonce
     # method to be called each time a new message has to be sent
-#------        
+#------      
+# handler_caller
+  # reads the message ID and calls the appropriate message handler  
+# decipher
+  # unbox the messages
+# sender
+    # cipher the content, pack it with the nonce, send it, update nonce, get confirmation
 # hello_back_payload_builder
   # build the hello back
 # peer identity verification
@@ -79,8 +85,56 @@ MAX_FIELD_SIZE = 1024
     end
   end
 
+  # reads the message ID and calls the appropriate message handler
+  def handler_caller(message)
+    offset = 0
+    id = read_exact(message, offset, 1)
+    handled_message = message.byteslice(1..)
     
+    case id
+      when "\x04"
+        registrate(handled_message) 
+    else
+      raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
+    end          
+  end
   
+  # unbox the messages
+  def decipher(blob, box)
+
+    blob_size = blob.bytesize
+    offset = 0
+    nonce = read_exact(blob, offset, 24)
+    offset += 24
+
+    cipher_header = read_exact(blob, offset, 4)
+    cipher_size = cipher_header.unpack1("N")
+    offset += 4
+
+    raise BlobSizeError, "Invalid blob size: #{cipher_size}" if cipher_size < 0 || cipher_size > MAX_BLOB_SIZE
+    raise BlobSizeError, "Mismatch between declared cipher size and received package size" if cipher_size != blob.bytesize - 24 - 4
+    cipher = read_exact(blob, offset, cipher_size)
+    plain_text = box.open(nonce, cipher)
+    plain_text
+  end
+
+
+
+  # cipher the content, pack it with the nonce, send it, update nonce, get confirmation
+  def sender(sock, box, nonce_session, payload)
+    nonce = nonce_session.next_nonce
+    ciphertext = box.box(nonce, payload)
+
+    payload =
+      nonce +
+      [ciphertext.bytesize].pack("N") +
+      ciphertext
+
+    write_all(sock, payload)
+    returned_payload = read_blob(sock)
+    plain_text = decipher(returned_payload, box)
+    plain_text
+  end    
 
   # build the hello back payload
   def hello_back_payload_builder(signature, eph_pk, local_nonce, identity, hello_id)
@@ -210,11 +264,11 @@ MAX_FIELD_SIZE = 1024
 
   # helper function used to read exactly the required size from a buffer
   def read_exact(buf, offset, len)
-  chunk = buf[offset, len]
+    chunk = buf[offset, len]
     if chunk.nil? || chunk.bytesize != len
       raise ProtocolError, "Truncated #{field_name}"
     end
-  chunk
+    chunk
   end
 
 
@@ -223,11 +277,11 @@ MAX_FIELD_SIZE = 1024
     raise ArgumentError, "Socket is nil" if sock.nil?
     raise ArgumentError, "Blob is nil" if blob.nil?
 
-  unless blob.is_a?(String)
-    raise TypeError, "Expected raw bytes (String), got #{blob.class}"
-  end
+    unless blob.is_a?(String)
+      raise TypeError, "Expected raw bytes (String), got #{blob.class}"
+    end
 
-  blob = blob.b  # enforce binary encoding
+    blob = blob.b  # enforce binary encoding
 
     digest = RbNaCl::Hash.sha256(blob)
     write_all(sock, digest)
@@ -278,7 +332,6 @@ MAX_FIELD_SIZE = 1024
 
   # helper method to ensure full_write on the remote socket
   def write_all(sock, payload, timeout: 10, max_attempts: 5)
-
 
     # prefix the payload with the whole size of the payload
     data =

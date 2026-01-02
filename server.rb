@@ -86,7 +86,46 @@ class SecureServer
     client_nonce
   end
 
+  # handle the registration of 
+  def registrate(message)
+    offset = 0
 
+    nickname_header = read_exact(message, offset, 1)
+    nickname_size = nickname_header.unpack1("C")
+    offset += 1
+    
+    nickname = read_exact(message, offset, nickname_size)
+    offset += nickname_size
+
+    unless message == 1 + nickname_size + 30
+      raise IOError, "Invalid registration message size" 
+    end
+
+    client_voucher = read_exact(message, offset, 30) 
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    db.transaction do
+      row = db.get_first_row(
+        "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
+        client_voucher
+      )
+      raise ProtocolError, "Invalid voucher" unless row
+
+      db.execute(
+        "UPDATE vouchers SET used_at = CURRENT_TIMESTAMP WHERE id = ?",
+        row["id"]
+      )
+    
+      if db.changes != 1
+        raise ProtocollError, "voucher update on db: ERROR"
+      end    
+    end
+
+      
+  end
+  
   # handles a single client 
   def hello_client(sock)
 
@@ -131,30 +170,6 @@ class SecureServer
     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
   end
 
-  # unbox the messages
-  def decipher(blob, box)
-
-    blob_size = blob.bytesize
-    offset = 0
-    nonce = read_exact(blob, offset, 24)
-    offset += 24
-    
-    cipher_header = read_exact(blob, offset, 4)
-    cipher_size = cipher_header.unpack1("N")
-    offset += 4
-
-    binding.pry
-    raise BlobSizeError, "Invalid blob size: #{cipher_size}" if cipher_size < 0 || cipher_size > MAX_BLOB_SIZE
-    raise BlobSizeError, "Mismatch between declared cipher size and received package size" if cipher_size != blob_size - 24 - 4
-    cipher = read_exact(blob, offset, cipher_size)
-    plain_text = box.open(nonce, cipher)   	  
-    plain_text
-	end			
-
-  # extract the message id and call the proper handler
-	def message_caller(message)
-
-	end
 
   # create a Ed25519 private key (signing key)
   # used to sign the server's ephimeral public key
@@ -190,7 +205,8 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        message_caller(message)
+        binding.pry
+        handler_caller(message)
       rescue Timeout::Error
         next
       rescue EOFError

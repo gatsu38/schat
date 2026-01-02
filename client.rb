@@ -103,25 +103,12 @@ class SecureClient
         
   end
 
-  # cipher the content, pack it with the nonce, send it, update nonce, wait confirmation
-  def cipher_pack_send_confirm(sock, box, nonce, payload)
-    ciphertext = box.box(nonce, payload)
+  def registration_confirmation()
 
-    payload = 
-      nonce +
-      [ciphertext.bytesize].pack("N") +
-      ciphertext
-
-    binding.pry
-    write_all(sock, payload)
-    next_nonce()
-        
-    
-    confirmation = read_blob(sock)    
   end
 
   # ask the user to provide a valid voucher and also recover the nickname from the db
-  def registration(handshake_info, nonce)
+  def registration(handshake_info, nonce_session)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
@@ -137,8 +124,10 @@ class SecureClient
 
     registration_data = registration_builder(nickname, voucher)
 
-    confirmation = cipher_pack_send_confirm(handshake_info[:sock], handshake_info[:client_box], nonce, registration_data)
+    returned_confirmation = sender(handshake_info[:sock], handshake_info[:client_box], nonce_session, registration_data)
 
+    confirmation = registration_confirmation(returned_confirmation)
+    
     if confirmation == true
       puts "Registration successful"
     else
@@ -188,10 +177,8 @@ include Utils
 
   # create and get the nonce ready
   nonce_session = Session.new("server", handshake_info[:client_nonce])
-  new_nonce = nonce_session.next_nonce
 
-  # 
-  client.registration(handshake_info, new_nonce)
+  client.registration(handshake_info, nonce_session)
 
   new_nonce = nonce_session.next_nonce
   

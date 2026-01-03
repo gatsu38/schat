@@ -52,9 +52,10 @@ SQL
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{VOUCHERS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    voucher BLOB NOT NULL UNIQUE (length(voucher) = 30),
+    voucher BLOB NOT NULL UNIQUE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    used_at DATETIME
+    used_at DATETIME,
+    CHECK (length(voucher) = 30)
   );
 SQL
 

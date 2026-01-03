@@ -103,8 +103,10 @@ class SecureClient
         
   end
 
-  def registration_confirmation()
-
+  def registration_confirmation(confirmation_byte)
+    binding.pry
+    success = confirmation_byte == "\x01" ? true : false
+    success
   end
 
   # ask the user to provide a valid voucher and also recover the nickname from the db
@@ -112,22 +114,33 @@ class SecureClient
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
+    # obtain the nickname from the db
     nickname = db.get_first_value(<<-SQL)
       SELECT username FROM user;
     SQL
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
-    
+
+    # obtain the voucher
     puts "Insert a valid voucher:"
     voucher = STDIN.gets.strip
 
+    # build the package containing the registration data: request_id, nickname, voucher
     registration_data = registration_builder(nickname, voucher)
 
-    returned_confirmation = sender(handshake_info[:sock], handshake_info[:client_box], nonce_session, registration_data)
+    # cipher and send the data
+    sender(handshake_info[:sock], safe_box, nonce_session, registration_data)
 
-    confirmation = registration_confirmation(returned_confirmation)
-    
+    # obtain server answer
+    returned_payload = read_blob(sock)
+
+    # decipher server answer
+    plain_text = decipher(returned_payload, safe_box)
+
+    # remove the request_id byte and call appropriate function for the server response analysis
+    confirmation = handler_caller(plain_text)
+
     if confirmation == true
       puts "Registration successful"
     else
@@ -180,8 +193,6 @@ include Utils
 
   client.registration(handshake_info, nonce_session)
 
-  new_nonce = nonce_session.next_nonce
-  
   client.ephemeral_keys_update(handshake_info)
 end
 main

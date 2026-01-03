@@ -34,7 +34,7 @@ MSG_CLIENT_HELLO_ID = "\x01"
 MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
 MSG_CLIENT_REGISTRATION = "\x04"
-MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
+MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -86,6 +86,14 @@ class SecureServer
     client_nonce
   end
 
+  def registration_response_builder(flag)
+    success_flag = flag == true ? "\x01" : "\x02"
+    response = 
+      MSG_SERVER_REGISTRATION_RESPONSE +
+      success_flag
+  response
+  end
+
   # handle the registration of 
   def registrate(message)
     offset = 0
@@ -97,12 +105,12 @@ class SecureServer
     nickname = read_exact(message, offset, nickname_size)
     offset += nickname_size
 
-    unless message == 1 + nickname_size + 30
+    unless message.bytesize == 1 + nickname_size + 30
       raise IOError, "Invalid registration message size" 
     end
 
     client_voucher = read_exact(message, offset, 30) 
-
+    encoded_voucher = client_voucher.force_encoding("UTF-8")
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
@@ -111,19 +119,27 @@ class SecureServer
         "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
         client_voucher
       )
-      raise ProtocolError, "Invalid voucher" unless row
-
+      unless row
+      
+        response_payload = registriation_response_builder(false)
+        return response_payload
+        raise ProtocolError, "Invalid voucher" 
+      end
+      
       db.execute(
         "UPDATE vouchers SET used_at = CURRENT_TIMESTAMP WHERE id = ?",
         row["id"]
       )
     
       if db.changes != 1
+        response_payload = registration_response_builder(false)
+        return response_payload        
         raise ProtocollError, "voucher update on db: ERROR"
       end    
     end
 
-      
+  response_payload = registration_response_builder(true)      
+  response_payload
   end
   
   # handles a single client 
@@ -193,7 +209,6 @@ class SecureServer
     client_nonce = handshake_info[:client_nonce]
     # create a nonce to be sent with each package
     nonce_session = Session.new("server", server_nonce)
-    send_nonce = nonce_session.next_nonce
 
     # extract all the handshake_info
     #     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_ehp_pk: client_epk_pk, client_pk: client_p>
@@ -205,8 +220,8 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        binding.pry
-        handler_caller(message)
+        response = handler_caller(message)
+        sender(sock, box, nonce_session, response)
       rescue Timeout::Error
         next
       rescue EOFError
@@ -326,7 +341,7 @@ def generate_vouchers()
   n.times do
     seed = RbNaCl::Random.random_bytes(32)
     seed_hash = RbNaCl::Hash.sha256(seed)
-    voucher = seed_hash.unpack("H*")[0, 30]
+    voucher = seed_hash.unpack1("H*")[0, 30]
 
     begin
       insert_stmt.execute(voucher)
@@ -344,6 +359,6 @@ end
 
 
 # non necessariamente instanziabile
-# generate_vouchers()
+#generate_vouchers()
 SecureServer.new(2222).run
 

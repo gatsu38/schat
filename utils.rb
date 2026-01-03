@@ -93,10 +93,13 @@ MAX_FIELD_SIZE = 1024
     
     case id
       when "\x04"
-        registrate(handled_message) 
+      response = registrate(handled_message) 
+      when "\x05"
+      response = registration_confirmation(handled_message)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
-    end          
+    end
+  response          
   end
   
   # unbox the messages
@@ -131,9 +134,6 @@ MAX_FIELD_SIZE = 1024
       ciphertext
 
     write_all(sock, payload)
-    returned_payload = read_blob(sock)
-    plain_text = decipher(returned_payload, box)
-    plain_text
   end    
 
   # build the hello back payload

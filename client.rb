@@ -4,6 +4,7 @@ require 'rbnacl'
 require 'openssl'
 require 'securerandom'
 require_relative 'utils'
+require_relative 'builders'
 require 'pry'
 require 'pry-byebug'
 require 'sqlite3'
@@ -13,7 +14,7 @@ require 'sqlite3'
   # !! verify server identity and connection genuinity !! add server pub key check
 # hello_server method for client
   # initialize the connection with the server
-# registration
+# registration_request
   # send registration request with nickname and voucher
 # registration_builder
   # build the registration package
@@ -31,7 +32,8 @@ class ProtocolError < StandardError; end
 class SecureClient
 
   include Utils
-
+  include Builders
+  
   def initialize(host, port)
     @host, @port = host, port
 
@@ -104,13 +106,31 @@ class SecureClient
   end
 
   def registration_confirmation(confirmation_byte)
+    raise ProtocolError unless confirmation_byte.bytesize == 1
     binding.pry
-    success = confirmation_byte == "\x01" ? true : false
-    success
+    case confirmation_byte
+      when "\x01"
+      puts "Registration completed successfully"
+      return true
+      when "\x02"
+      puts "Invalid voucher"
+      return false
+      when "\x03"
+      puts "Nickname already registered"
+      return false
+      when "\x04"
+      puts "Invalid nickname, only alphanumeric 1-20(size)"
+      return false
+      when "\x05"
+      puts "Unknown server side error"
+      return false
+    else
+      raise "Unknown server side error response"
+    end
   end
 
   # ask the user to provide a valid voucher and also recover the nickname from the db
-  def registration(handshake_info, nonce_session)
+  def registration_request(handshake_info, nonce_session)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
@@ -132,6 +152,7 @@ class SecureClient
     # cipher and send the data
     sender(handshake_info[:sock], safe_box, nonce_session, registration_data)
 
+    binding.pry
     # obtain server answer
     returned_payload = read_blob(sock)
 
@@ -139,32 +160,10 @@ class SecureClient
     plain_text = decipher(returned_payload, safe_box)
 
     # remove the request_id byte and call appropriate function for the server response analysis
-    confirmation = handler_caller(plain_text)
-
-    if confirmation == true
-      puts "Registration successful"
-    else
-      puts "Registration failed"
-    end
+    handler_caller(plain_text)
 
   end
 
-  # build the registration message
-  def registration_builder(nickname, voucher)
-    raise ArgumentError, "Nickname too long" if nickname.bytesize > 20
-
-    registration_payload = 
-      MSG_CLIENT_REGISTRATION +
-      [nickname.bytesize].pack("C") +
-      nickname +
-      voucher
-
-    registration_payload      
-  end
-
-  # this method is used to cip
-  
-  
 
   # used to generate, check and update the ephemeral_keys 
   def ephemeral_keys_update(handshake_info)
@@ -191,7 +190,7 @@ include Utils
   # create and get the nonce ready
   nonce_session = Session.new("server", handshake_info[:client_nonce])
 
-  client.registration(handshake_info, nonce_session)
+  client.registration_request(handshake_info, nonce_session)
 
   client.ephemeral_keys_update(handshake_info)
 end

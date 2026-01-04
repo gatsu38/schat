@@ -16,20 +16,12 @@
   # unbox the messages
 # sender
     # cipher the content, pack it with the nonce, send it, update nonce, get confirmation
-# hello_back_payload_builder
-  # build the hello back
 # peer identity verification
   # verify remote identity and connection genuinity
-# sig_builder
-  # build the signature to send back to the client after hello
-# protocol_name_builder 
-  # builder for client hello, outputs protocol name + padding
 # read_exact
     # helper function used to read exactly the required size from a buffer
 # receive_and_check
   # function to receive public key, ephimeral key and signature
-# digest_confirmation
-  # send back a hash of the blob to confirm arrival                     
 # read_socket
   # method to safely read the TCP socket
 # read_blob         
@@ -86,14 +78,14 @@ MAX_FIELD_SIZE = 1024
   end
 
   # reads the message ID and calls the appropriate message handler
-  def handler_caller(message)
+  def handler_caller(message, handshake_info = nil)
     offset = 0
     id = read_exact(message, offset, 1)
     handled_message = message.byteslice(1..)
     
     case id
       when "\x04"
-      response = registrate(handled_message) 
+      response = registration_request_handler(handled_message, handshake_info) 
       when "\x05"
       response = registration_confirmation(handled_message)
     else
@@ -136,22 +128,6 @@ MAX_FIELD_SIZE = 1024
     write_all(sock, payload)
   end    
 
-  # build the hello back payload
-  def hello_back_payload_builder(signature, eph_pk, local_nonce, identity, hello_id)
-
-  protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
-
-    payload =
-      protocol_start +
-      hello_id +
-      identity +
-      @host_pk.to_bytes +
-      eph_pk.to_bytes +
-      local_nonce +
-      signature
-
-    payload
-  end
 
   # verify remote identity and connection genuinity
   def peer_identity_verification(nonce, protocol_start, payload, identity, hello_id)
@@ -226,41 +202,7 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # build the signature to send back to the client after hello
-  def sig_builder(peer_nonce, eph_pk, local_nonce, identity, hello_id)
 
-  unless identity == "client" || identity == "server"
-    raise ProtocolError, "Invalid identity role"
-  end
-
-    puts "building signature for server authentication"
-    transcript =
-      [PROTOCOL_NAME.bytesize].pack("n") +
-      PROTOCOL_NAME +
-      hello_id +
-      identity +
-      @host_pk.to_bytes +
-      peer_nonce +
-      local_nonce +
-      eph_pk.to_bytes
-    sig = @host_sk.sign(transcript)
-    sig
-  end
-
-
-  # builder for client hello: protocol name + padding preparation
-  def protocol_name_builder(current_protocol_name, max_protocol_size)
-    protocol_start = current_protocol_name.b
-    if protocol_start.bytesize > max_protocol_size
-      raise ArgumentError, "PROTOCOL_NAME too long (max #{MAX_PROTO_FIELD} bytes)"
-    end
-    padding_len = max_protocol_size - protocol_start.bytesize
-    padding = "\x00" * padding_len  
-    protocol_name_with_padding =
-      protocol_start +
-      padding
-    protocol_name_with_padding
-  end
 
   # helper function used to read exactly the required size from a buffer
   def read_exact(buf, offset, len)
@@ -272,21 +214,6 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # send back a hash of the blob to confirm arrival 
-  def digest_confirmation(sock, blob)
-    raise ArgumentError, "Socket is nil" if sock.nil?
-    raise ArgumentError, "Blob is nil" if blob.nil?
-
-    unless blob.is_a?(String)
-      raise TypeError, "Expected raw bytes (String), got #{blob.class}"
-    end
-
-    blob = blob.b  # enforce binary encoding
-
-    digest = RbNaCl::Hash.sha256(blob)
-    write_all(sock, digest)
-  end
-  
   # method to safely read the TCP socket
   def read_socket(sock, n, timeout)
     buf = +""

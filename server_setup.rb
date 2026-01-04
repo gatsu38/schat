@@ -20,8 +20,8 @@ db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{CLIENTS_INFO} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE CHECK (
-        length(username) <= 20 AND
-        username GLOB '[A-Za-z0-9]*'
+        length(username) BETWEEN 1 AND 20 AND
+        username NOT GLOB '*[^A-Za-z0-9]*'
       ),
     public_key BLOB NOT NULL CHECK (length(public_key) = 32),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP

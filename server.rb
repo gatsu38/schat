@@ -5,6 +5,7 @@ require 'openssl'
 require 'securerandom'
 require 'concurrent-ruby'
 require_relative 'utils'
+require_relative 'builders'
 require 'pry'
 require 'pry-byebug'
 require 'sqlite3'
@@ -39,9 +40,19 @@ MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
 
+class ProtocolError < StandardError
+  attr_reader :code
+
+  def initialize(message, code)
+    super(message)
+    @code = code
+  end
+end
+
 # === Server ===
 class SecureServer
   include Utils
+  include Builders
 
   # usfed to receive the hello message from client   
   def receive_hello(sock)
@@ -73,12 +84,6 @@ class SecureServer
     # 3) Remaining bytes are the nonce
     client_nonce = read_exact(blob, offset, 15)
 
-#    begin
-#      db.execute("INSERT INTO #{NONCES} (nonce) VALUES (?)", [client_nonce])
-#    rescue SQLite3::ConstraintException
-#      raise ProtocolError, "Replay detected"
-#    end
-
     # Optional sanity check
     unless client_nonce.bytesize == 15
       raise IOError, "Invalid nonce size: #{nonce.bytesize}"
@@ -86,23 +91,37 @@ class SecureServer
     client_nonce
   end
 
-  def registration_response_builder(flag)
-    success_flag = flag == true ? "\x01" : "\x02"
-    response = 
-      MSG_SERVER_REGISTRATION_RESPONSE +
-      success_flag
-  response
+  # register the user on the db with the publik_key
+  def registrate_new_user(nickname, handshake_info, db)
+    #db = SQLite3::Database.new(DB_FILE)
+    #db.results_as_hash = true
+
+    client_pk = handshake_info[:client_pk].to_bytes        
+
+    db.execute(
+      "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
+      [nickname, client_pk]
+    )
+
+    raise ProtocollError, "voucher update on db: ERROR" unless db.changes == 1
+    
   end
 
-  # handle the registration of 
-  def registrate(message)
+  # handle the registration of a new user
+  def registration_request_handler(message, handshake_info)
     offset = 0
+    client_pk = handshake_info[:client_pk].to_bytes\
 
     nickname_header = read_exact(message, offset, 1)
     nickname_size = nickname_header.unpack1("C")
     offset += 1
     
-    nickname = read_exact(message, offset, nickname_size)
+    nickname = read_exact(message, offset, nickname_size).force_encoding("ASCII")
+
+    unless nickname.is_a?(String) && nickname.match?(/\A[A-Za-z0-9]{1-20}\z/)
+      response_payload = registration_response_builder("\x04")
+    end
+    
     offset += nickname_size
 
     unless message.bytesize == 1 + nickname_size + 30
@@ -114,32 +133,46 @@ class SecureServer
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    db.transaction do
-      row = db.get_first_row(
-        "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
-        client_voucher
-      )
-      unless row
-      
-        response_payload = registriation_response_builder(false)
-        return response_payload
-        raise ProtocolError, "Invalid voucher" 
-      end
-      
-      db.execute(
-        "UPDATE vouchers SET used_at = CURRENT_TIMESTAMP WHERE id = ?",
-        row["id"]
-      )
-    
-      if db.changes != 1
-        response_payload = registration_response_builder(false)
-        return response_payload        
-        raise ProtocollError, "voucher update on db: ERROR"
-      end    
-    end
+    transaction_successful = false
+    begin
+      db.transaction do
+      binding.pry
+        row_voucher = db.get_first_row(
+          "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
+          client_voucher
+        )
+        
+        raise ProtocolError.new("Invalid voucher", "\x02") unless row_voucher
+        
+        begin    
+          db.execute(
+           "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
+          [nickname, client_pk]
+          )
+        rescue SQLite3::ConstrainException
+          raise ProtocolError.new("Username already exists", "\x03")
+        end
+             
+        db.execute(
+          "UPDATE vouchers SET used_at = CURRENT_TIMESTAMP WHERE id = ?",
+          row_voucher["id"]
+        )
 
-  response_payload = registration_response_builder(true)      
-  response_payload
+        raise ProtocolError.new("Unknown error", "\x05") if db.changes != 1
+        transaction_successful = true
+
+      end    
+    rescue ProtocolError => e
+      response_payload = registration_response_builder(e.code)    
+    end
+  if transaction_successful
+    response_payload = registration_response_builder("\x01")
+  end
+
+  response_payload  
+
+  ensure
+    db&.close
   end
   
   # handles a single client 
@@ -181,7 +214,6 @@ class SecureServer
     client_pk = client_info[:remote_pk]
     
     client_eph_pk = client_info[:remote_eph_pk]    
-
     server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
   end
@@ -220,7 +252,7 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        response = handler_caller(message)
+        response = handler_caller(message, handshake_info)
         sender(sock, box, nonce_session, response)
       rescue Timeout::Error
         next

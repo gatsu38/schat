@@ -46,7 +46,7 @@ begin
     );
   SQL
 
-  # createa table to keep track of the ephemeral public keys shared 
+  # keeps track of the ephemeral public keys shared 
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{KEYS_TABLE} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

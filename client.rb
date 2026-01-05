@@ -27,6 +27,8 @@ MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
 MSG_CLIENT_REGISTRATION = "\x04"
 MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
+MSG_CLIENT_EPH_KEY_CHECK = "\x06"
+MSG_SERVER_EPH_KEY_CHECK = "\x07" 
 class ProtocolError < StandardError; end
 
 class SecureClient
@@ -105,9 +107,9 @@ class SecureClient
         
   end
 
+  # handles the returned value from the server at the end of the user registration
   def registration_confirmation(confirmation_byte)
     raise ProtocolError unless confirmation_byte.bytesize == 1
-    binding.pry
     case confirmation_byte
       when "\x01"
       puts "Registration completed successfully"
@@ -150,9 +152,8 @@ class SecureClient
     registration_data = registration_builder(nickname, voucher)
 
     # cipher and send the data
-    sender(handshake_info[:sock], safe_box, nonce_session, registration_data)
+    sender(sock, safe_box, nonce_session, registration_data)
 
-    binding.pry
     # obtain server answer
     returned_payload = read_blob(sock)
 
@@ -164,10 +165,50 @@ class SecureClient
 
   end
 
+  # used to create new ephemeral keys for future connection
+  def create_new_eph_keys(count = 20)
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    db.transaction do
+      count.times do
+        eph_sk = RbNaCl::PrivateKey.generate
+        eph_pk = eph_sk.public_key
+  
+        eph_sk_bytes = eph_sk.to_bytes
+        eph_pk_bytes = eph_pk.to_bytes
+        db.execute(
+          "INSERT INTO ephemeral_keys (ephemeral_private_key, ephemeral_public_key)
+          VALUES (?, ?)",
+          [eph_sk_bytes, eph_pk_bytes]
+        )
+      end
+    end
+  ensure
+    db&.close
+  end
+
 
   # used to generate, check and update the ephemeral_keys 
-  def ephemeral_keys_update(handshake_info)
-    
+  def ephemeral_keys_update(handshake_info, nonce_session)
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+
+    eph_key_check_payload = MSG_CLIENT_EPH_KEY_CHECK
+
+    sender(sock, safe_box, nonce_session, eph_key_check_payload)
+
+    returned_payload = read_blob(sock)
+
+    plain_text = decipher(returned_payload, safe_box)
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+  ensure
+    db&.close     
   end
 
 end
@@ -185,13 +226,13 @@ include Utils
   
   # inside handshake info there is all the info concerning the connection:
   # keys, nonces, box and socket
-  handshake_info = client.hello_server(choice)
+  #handshake_info = client.hello_server(choice)
 
   # create and get the nonce ready
-  nonce_session = Session.new("server", handshake_info[:client_nonce])
+  # nonce_session = Session.new("server", handshake_info[:client_nonce])
 
-  client.registration_request(handshake_info, nonce_session)
-
-  client.ephemeral_keys_update(handshake_info)
+  #client.registration_request(handshake_info, nonce_session)
+  client.create_new_eph_keys()
+  client.ephemeral_keys_update(handshake_info, nonce_session)
 end
 main

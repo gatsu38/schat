@@ -136,7 +136,6 @@ class SecureServer
     transaction_successful = false
     begin
       db.transaction do
-      binding.pry
         row_voucher = db.get_first_row(
           "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
           client_voucher
@@ -149,7 +148,7 @@ class SecureServer
            "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
           [nickname, client_pk]
           )
-        rescue SQLite3::ConstrainException
+        rescue SQLite3::ConstraintException
           raise ProtocolError.new("Username already exists", "\x03")
         end
              
@@ -377,7 +376,7 @@ def generate_vouchers()
 
     begin
       insert_stmt.execute(voucher)
-    rescue SQLite3::ConstrainException
+    rescue SQLite3::ConstraintException
       retry
     end
   end

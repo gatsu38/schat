@@ -5,10 +5,10 @@ require 'rbnacl'
 DB_FILE = '/home/kali/schat_db/schat.db'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
-CLIENTS_INFO = 'clients_info'
 CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
 NONCES = 'nonces'
 VOUCHERS = 'vouchers'
+SERVER_INFO = 'server_info'
 #if File.exist?(DB_FILE)
 #  puts "Database already exists. Exiting"
 #  exit
@@ -76,6 +76,7 @@ db.execute <<-SQL
     create_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL
+
 
     
 

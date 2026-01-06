@@ -118,7 +118,7 @@ class SecureServer
     
     nickname = read_exact(message, offset, nickname_size).force_encoding("ASCII")
 
-    unless nickname.is_a?(String) && nickname.match?(/\A[A-Za-z0-9]{1-20}\z/)
+    unless nickname.is_a?(String) && nickname.match?(/\A[A-Za-z0-9]{1,20}\z/)
       response_payload = registration_response_builder("\x04")
     end
     
@@ -228,9 +228,25 @@ class SecureServer
     @port = port
     @pool = Concurrent::FixedThreadPool.new(20)
 
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    host_row = db.get_first_row("SELECT private_key, public_key FROM host_keys")
+
+    raise ProtocolError, "No host key found" unless host_row
+    
     # Long-term host key (Ed25519)
-    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
-    @host_pk = @host_sk.verify_key
+    host_sk_bytes = host_row["private_key"]
+    host_pk_bytes = host_row["public_key"]
+
+    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
+    @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
+
+    host_pk_hex = host_pk_bytes.unpack1("H*")
+    pretty = host_pk_hex.scan(/.{4}/).join(":")
+    puts "Server fingerprint: #{pretty}"
+  ensure
+    db&.close
   end  
 
   # this method is used to handle all the messages received from a single client after hello

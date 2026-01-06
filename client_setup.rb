@@ -1,13 +1,14 @@
 #!/usr/bin/env ruby
 require 'sqlite3'
 require 'rbnacl'
-
+require 'pry'
+require 'pry-byebug'
 # !!!! FIXARE IL PATH
 DB_FILE = File.expand_path('/home/kali/schat_db/client.db')
 CONTACTS_TABLE = 'contacts'
 USER_TABLE = 'user'
 KEYS_TABLE = 'ephemeral_keys'
-
+SERVER_IDENTITY = 'server_identity'
 
 if File.exist?(DB_FILE)
   puts "Database already exists. Would you like to create a new identity? Y/N"
@@ -16,6 +17,8 @@ if File.exist?(DB_FILE)
 end
 
 begin
+
+binding.pry
 
   db = SQLite3::Database.new(DB_FILE)
 
@@ -52,6 +55,16 @@ begin
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       ephemeral_private_key BLOB NOT NULL CHECK (length(ephemeral_private_key) = 32),
       ephemeral_public_key BLOB NOT NULL CHECK (length(ephemeral_public_key) = 32),
+      added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  SQL
+
+  db.execute <<-SQL
+    CREATE TABLE IF NOT EXISTS #{SERVER_IDENTITY} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_name TEXT UNIQUE,
+      public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+      fingerprint TEXT NOT NULL,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   SQL

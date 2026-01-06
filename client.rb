@@ -39,8 +39,81 @@ class SecureClient
   def initialize(host, port)
     @host, @port = host, port
 
-    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
-    @host_pk = @host_sk.verify_key
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    host_row = db.get_first_row("SELECT private_key, public_key FROM user")
+
+    raise ProtocolError, "No host key found" unless host_row
+
+    # Long-term host key (Ed25519)
+    host_sk_bytes = host_row["private_key"]
+    host_pk_bytes = host_row["public_key"]
+
+    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
+    @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
+
+  ensure
+    db&.close    
+  end
+
+  def server_fingerprint_check(remote_pk)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    remote_pk_bytes = remote_pk.to_bytes
+
+    # transform the public key into a human readable fingerprint
+    pretty_remote_pk = remote_pk_bytes.unpack1("H*").scan(/.{4}/).join(":")
+
+    # obtain the previously registered info about the server
+    server = db.get_first_row("SELECT fingerprint, server_name FROM server_identity WHERE public_key = ?", remote_pk_bytes)
+
+    raise ProtocolError, "Unknown server public key" unless server
+
+    registered_fingerprint = server["fingerprint"]
+    registered_server_name = server["server_name"]
+    puts "Remote fingerprint and pre-shared fingerprint for #{registered_server_name}:"
+    puts "remote:#{pretty_remote_pk}"
+    puts "pre   :#{registered_fingerprint}"
+
+    
+  ensure
+    db&.close
+  end
+
+  # ask the user to provide the server fingerprint, use it later to check the server identity
+  def server_fingerprint_registration()
+    while true
+      puts "please insert the server fingerprint"
+      fingerprint = gets&.strip
+      puts "please give a name to the server, (only used locally for identification)"
+      puts "maximum size 20 characters and only alphanumerical allowed "
+      server_name = gets&.strip
+
+      if server_name&.match?(/\A[A-Za-z0-9]{1,20}\z/) && fingerprint&.match?(/\A(?:[a-f0-9]{4}:){15}[a-f0-9]{4}\z/)
+        break
+      else
+        puts "invalid server name or fingerprint"
+        next
+      end
+    end
+    
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    hex = fingerprint.delete(":")
+    pk_bytes = [hex].pack("H*")
+
+    binding.pry
+    raise ArgumentError, "Invalid public key length" unless pk_bytes.bytesize == 32
+
+    db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
+      [fingerprint, server_name, pk_bytes]
+    )
+    binding.pry
+  ensure
+    db&.close
   end
 
 
@@ -83,6 +156,9 @@ class SecureClient
     server_eph_pk = server_info[:remote_eph_pk]
     server_nonce = server_info[:remote_nonce]
 
+    # check if the server public key is the same as the registered one
+    server_fingerprint_check(server_pk)
+    
     # create a signature only valid for these nonces
     signature = sig_builder(server_nonce, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
 
@@ -210,7 +286,7 @@ class SecureClient
   ensure
     db&.close     
   end
-
+  
 end
 
 def main
@@ -226,13 +302,15 @@ include Utils
   
   # inside handshake info there is all the info concerning the connection:
   # keys, nonces, box and socket
-  #handshake_info = client.hello_server(choice)
+  handshake_info = client.hello_server(choice)
 
   # create and get the nonce ready
-  # nonce_session = Session.new("server", handshake_info[:client_nonce])
+  nonce_session = Session.new("server", handshake_info[:client_nonce])
 
+
+  # client.server_fingerprint_registration()
   #client.registration_request(handshake_info, nonce_session)
-  client.create_new_eph_keys()
-  client.ephemeral_keys_update(handshake_info, nonce_session)
+  #client.create_new_eph_keys()
+  #client.ephemeral_keys_update(handshake_info, nonce_session)  
 end
 main

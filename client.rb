@@ -29,6 +29,8 @@ MSG_CLIENT_REGISTRATION = "\x04"
 MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
 MSG_CLIENT_EPH_KEY_CHECK = "\x06"
 MSG_SERVER_EPH_KEY_CHECK = "\x07" 
+MSG_CLIENT_EEE_HELLO = "\x08"
+SERVER_EEE_HELLO_CONFIRMED = "\X09"
 class ProtocolError < StandardError; end
 
 class SecureClient
@@ -105,13 +107,11 @@ class SecureClient
     hex = fingerprint.delete(":")
     pk_bytes = [hex].pack("H*")
 
-    binding.pry
     raise ArgumentError, "Invalid public key length" unless pk_bytes.bytesize == 32
 
     db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
       [fingerprint, server_name, pk_bytes]
     )
-    binding.pry
   ensure
     db&.close
   end
@@ -217,12 +217,23 @@ class SecureClient
       SELECT username FROM user;
     SQL
 
+    raise ArgumentError, "Please register a username first during database setup" unless nickname 
+
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
 
     # obtain the voucher
     puts "Insert a valid voucher:"
-    voucher = STDIN.gets.strip
+    while true
+      input = STDIN.gets
+      break unlesse input
+      voucher = input.strip
+      if voucher&.match?(/\A([a-f0-9]{30})\z/)
+        break
+      else
+        puts "Invalid voucher, try again"
+      end
+    end
 
     # build the package containing the registration data: request_id, nickname, voucher
     registration_data = registration_builder(nickname, voucher)
@@ -286,6 +297,52 @@ class SecureClient
   ensure
     db&.close     
   end
+
+  # the hello method that asks the server to save the 
+  def eee_hello(handshake_info, nonce_session)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    eph_sk = RbNaCl::PrivateKey.generate
+    eph_pk = eph_sk.public_key
+
+    eph_sk_bytes = eph_pk.to_bytes
+    eph_pk_bytes = eph_pk.to_bytes
+
+    signed_prekey_sig = @host_sk.sign(eph_pk_bytes)
+    db.execute("INSERT INTO shared_prekey (private_signed_prekey, public_signed_prekey) VALUES (?, ?)",
+      [eph_sk_bytes, eph_pk_bytes]
+    )
+
+    one_time_prekeys = []
+
+    counter = 1
+    50.times do
+      sk = RbNaCl::PrivateKey.generate
+      pk = sk.public_key
+
+      sk_bytes = sk.to_bytes
+      pk_bytes = pk.to_bytes
+      db.execute("INSERT INTO one_time_keys (one_time_public_key, one_time_private_key, counter) VALUES (?, ?, ?)",
+        [pk_bytes, sk_bytes, counter]
+      )
+      
+      one_time_prekeys << {pk: pk_bytes, counter: counter}
+      counter += 1
+    end
+    # build the payload for e2ee long term public id, the temporary key, the signature and all the one time keys
+    payload = eee_builder(eph_pk_bytes, signed_prekey_sig,  one_time_prekeys)
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+
+    message = MSG_CLIENT_EEE_HELLO + payload
+    binding.pry
+    sender(sock, safe_box, nonce_session, message)
+    returned_payload = read_blob(sock)
+  rescue
+    db&.close
+  end
   
 end
 
@@ -300,17 +357,24 @@ include Utils
   choice = STDIN.gets.strip
   client = SecureClient.new("127.0.0.1", 2222)
   
-  # inside handshake info there is all the info concerning the connection:
-  # keys, nonces, box and socket
+  # -inside handshake info there is all the info concerning the connection:
+  # -keys, nonces, box and socket
   handshake_info = client.hello_server(choice)
 
-  # create and get the nonce ready
+  # -create and get the nonce ready
   nonce_session = Session.new("server", handshake_info[:client_nonce])
-
-
-  # client.server_fingerprint_registration()
+  # - used to register a server with a previously shared public key / fingerprint
+  #client.server_fingerprint_registration()
+  
+  # - used to ask the server to register our client nickname and voucher
   #client.registration_request(handshake_info, nonce_session)
-  #client.create_new_eph_keys()
-  #client.ephemeral_keys_update(handshake_info, nonce_session)  
+
+  # - create new ephemeral keys
+  # client.create_new_eph_keys()
+
+  # - send the info for the e2ee
+  client.eee_hello(handshake_info, nonce_session)
+  
+  # client.ephemeral_keys_update(handshake_info, nonce_session)  
 end
 main

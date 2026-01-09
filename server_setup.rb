@@ -3,12 +3,14 @@ require 'sqlite3'
 require 'rbnacl'
 
 DB_FILE = '/home/kali/schat_db/schat.db'
+CLIENTS_INFO = 'clients_info'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
 CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
 NONCES = 'nonces'
 VOUCHERS = 'vouchers'
 SERVER_INFO = 'server_info'
+PREKEYS = 'one_time_prekeys'
 #if File.exist?(DB_FILE)
 #  puts "Database already exists. Exiting"
 #  exit
@@ -24,7 +26,24 @@ db.execute <<-SQL
         username NOT GLOB '*[^A-Za-z0-9]*'
       ),
     public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+    signed_prekey_pub BLOB NOT NULL UNIQUE CHECK (length(signed_prekey_pub) = 32),
+    signed_prekey_sig BLOB NOT NULL UNIQUE CHECK (length(signed_prekey_sig) = 32),
+    spk_created_at TIMESTAMP NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+SQL
+
+db.execute <<-SQL
+  CREATE TABLE IF NOT EXISTS #{PREKEYS} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  opk_pub BLOB NOT NULL UNIQUE CHECK (length(opk_pub) = 32),
+  used BOOLEAN default false,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+  FOREIGN KEY (client_id)
+    REFERENCES clients_info(id)
+    ON DELETE CASCADE
   );
 SQL
 

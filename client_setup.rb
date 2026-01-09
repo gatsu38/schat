@@ -9,7 +9,8 @@ CONTACTS_TABLE = 'contacts'
 USER_TABLE = 'user'
 KEYS_TABLE = 'ephemeral_keys'
 SERVER_IDENTITY = 'server_identity'
-
+SHARED_PREKEY = 'shared_prekey'
+ONE_TIME_KEYS = 'one_time_keys'
 if File.exist?(DB_FILE)
   puts "Database already exists. Would you like to create a new identity? Y/N"
   answer = gets.chomp.strip.upcase
@@ -66,6 +67,24 @@ binding.pry
       public_key BLOB NOT NULL CHECK (length(public_key) = 32),
       fingerprint TEXT NOT NULL,
       added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  SQL
+
+  db.execute <<-SQL
+    CREATE TABLE IF NOT EXISTS #{SHARED_PREKEY} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      private_signed_prekey BLOB NOT NULL CHECK (length(private_signed_prekey) = 32),
+      public_signed_prekey BLOB NOT NULL CHECK (length(public_signed_prekey) = 32),
+      addet_at DATETIME DEFAULT CURRENT_TIMESTAMP      
+    );
+  SQL
+
+  db.execute <<-SQL
+    CREATE TABLE IF NOT EXISTS #{ONE_TIME_KEYS} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      one_time_public_key BLOB NOT NULL CHECK (length(one_time_public_key) = 32),
+      one_time_private_key BLOB NOT NULL CHECK (length(one_time_private_key) = 32),
+      counter INTEGER NOT NULL
     );
   SQL
 

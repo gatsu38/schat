@@ -23,6 +23,8 @@ require 'sqlite3'
   # spawns a new thread for each new client connection
 # shutdown
   # safe database shutdown
+# generate_vouchers
+  # create the vouchers
 DB_FILE = '/home/kali/schat_db/schat.db'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
@@ -36,6 +38,7 @@ MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
 MSG_CLIENT_REGISTRATION = "\x04"
 MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
+MSG_CLIENT_EEE_HELLO = "\x08"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -124,17 +127,16 @@ class SecureServer
     
     offset += nickname_size
 
-    unless message.bytesize == 1 + nickname_size + 30
-      raise IOError, "Invalid registration message size" 
-    end
+    transaction_successful = false
+
+    begin
+    raise ProtocolError.new("Invalid registration message size", "\x02" ) unless message.bytesize == 1 + nickname_size + 30
 
     client_voucher = read_exact(message, offset, 30) 
     encoded_voucher = client_voucher.force_encoding("UTF-8")
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    transaction_successful = false
-    begin
       db.transaction do
         row_voucher = db.get_first_row(
           "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
@@ -145,7 +147,7 @@ class SecureServer
         
         begin    
           db.execute(
-           "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
+          "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
           [nickname, client_pk]
           )
         rescue SQLite3::ConstraintException
@@ -173,6 +175,31 @@ class SecureServer
   ensure
     db&.close
   end
+
+  def eee_receiver(payload)
+    offset = 0
+    public_key = read_exact(payload, offset, 32)
+    offset += 32
+
+    signature_size_packed = read_exact(payload, offset, 2)
+    signature_size = signature_size_packed.unpack1("n")
+    offset += 2
+
+    signature = read_exact(payload, offset, signature_size)
+    offset += signature_size
+
+    otp_size_packed = read_exact(payload, offset, 4)
+    otp_size = otp_size_packed.unpack1("N")
+    offset += 4
+
+    unless payload.bytesize == 32 + 2 + signature_size + 4 + otp_size
+      raise ProtocolError, "received wrong size for e2ee hello" 
+    end
+    
+    one_time_keys = read_exact(payload, offset, otp_size)  
+    one_time_keys
+  end
+  
   
   # handles a single client 
   def hello_client(sock)

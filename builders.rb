@@ -1,8 +1,8 @@
 # This file is a collection of methods used to build payloads
 
-#registration_builder
+# registration_builder
   # build the registration message for the client to send to the server
-# registration_response
+# registration_response_builder
   # build the payload for the server to answer client's registration 
 # hello_back_payload_builder
   # build the hello back payload
@@ -36,7 +36,33 @@ module Builders
   response
   end
 
+  
+  # build the payload containing the ephemeral_key, the long term public_key, the one time keys and the signature
+  def eee_builder(eph_key, signature, one_time_keys)
 
+    one_time_keys_payload = +""
+    (0..49).each do |n|
+      key = one_time_keys[n][:pk]
+      counter = [one_time_keys[n][:counter]].pack("C")
+      one_time_keys_payload << key
+      one_time_keys_payload << counter
+    end
+
+    raise ProtocolError, "wrong one time keys payload size" unless one_time_keys_payload.bytesize == 32 * 50 + 50 
+  
+    host_pk_bytes = @host_pk.to_bytes
+    signature_size = signature.bytesize
+    otp_size = one_time_keys_payload.bytesize
+    binding.pry
+      payload =
+        host_pk_bytes +
+        [signature_size].pack("n") +
+        signature +
+        [otp_size].pack("N") +
+        one_time_keys_payload    
+    payload
+  end
+  
   # build the hello back payload
   def hello_back_payload_builder(signature, eph_pk, local_nonce, identity, hello_id)
 

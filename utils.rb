@@ -88,6 +88,9 @@ MAX_FIELD_SIZE = 1024
       response = registration_request_handler(handled_message, handshake_info) 
       when "\x05"
       response = registration_confirmation(handled_message)
+      when "\x08"
+      binding.pry
+      response = eee_receiver(handled_message)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end

@@ -50,12 +50,10 @@ module Builders
 
     raise ProtocolError, "wrong one time keys payload size" unless one_time_keys_payload.bytesize == 32 * 50 + 50 
   
-    host_pk_bytes = @host_pk.to_bytes
     signature_size = signature.bytesize
     otp_size = one_time_keys_payload.bytesize
-    binding.pry
       payload =
-        host_pk_bytes +
+        eph_key +
         [signature_size].pack("n") +
         signature +
         [otp_size].pack("N") +

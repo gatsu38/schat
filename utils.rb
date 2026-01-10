@@ -89,8 +89,7 @@ MAX_FIELD_SIZE = 1024
       when "\x05"
       response = registration_confirmation(handled_message)
       when "\x08"
-      binding.pry
-      response = eee_receiver(handled_message)
+      response = eee_receiver(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end
@@ -211,7 +210,7 @@ MAX_FIELD_SIZE = 1024
   def read_exact(buf, offset, len)
     chunk = buf[offset, len]
     if chunk.nil? || chunk.bytesize != len
-      raise ProtocolError, "Truncated #{field_name}"
+      raise ProtocolError, "Truncated chunk #{chunk}"
     end
     chunk
   end

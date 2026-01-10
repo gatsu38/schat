@@ -226,7 +226,7 @@ class SecureClient
     puts "Insert a valid voucher:"
     while true
       input = STDIN.gets
-      break unlesse input
+      break unless input
       voucher = input.strip
       if voucher&.match?(/\A([a-f0-9]{30})\z/)
         break
@@ -337,7 +337,6 @@ class SecureClient
     safe_box = handshake_info[:client_box]
 
     message = MSG_CLIENT_EEE_HELLO + payload
-    binding.pry
     sender(sock, safe_box, nonce_session, message)
     returned_payload = read_blob(sock)
   rescue
@@ -350,31 +349,55 @@ def main
 include Utils
   puts "Schat. SecureChat client v1.0"
   puts "Choose an option:"
-  puts "1) Register"
-  puts "2) Check contact list"
+  puts "1) register server fingerprint on the local db"
+  puts "2) register the client with the server"
   puts "3) Send message"
   puts "4) Get messages"
-  choice = STDIN.gets.strip
+  choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
-  
-  # -inside handshake info there is all the info concerning the connection:
-  # -keys, nonces, box and socket
-  handshake_info = client.hello_server(choice)
 
-  # -create and get the nonce ready
-  nonce_session = Session.new("server", handshake_info[:client_nonce])
-  # - used to register a server with a previously shared public key / fingerprint
-  #client.server_fingerprint_registration()
   
-  # - used to ask the server to register our client nickname and voucher
-  #client.registration_request(handshake_info, nonce_session)
+  case choice
+    when 1
+      # - used to register a server with a previously shared public key / fingerprint
+      client.server_fingerprint_registration()
+      
+    when 2
+      # -inside handshake info there is all the info concerning the connection:
+      # - used to ask the server to register our client nickname and voucher
+      handshake_info = client.hello_server(choice)
+
+      # -create and get the nonce ready
+      nonce_session = Session.new("server", handshake_info[:client_nonce])
+
+      client.registration_request(handshake_info, nonce_session)
+    when 3
+      if handshake_info && nonce_session
+        client.eee_hello(handshake_info, nonce_session)
+      else
+
+        handshake_info = client.hello_server(choice)
+        nonce_session = Session.new("server", handshake_info[:client_nonce])
+        client.registration_request(handshake_info, nonce_session)
+      end
+    when 4
+      if handshake_info && nonce_session
+        client.eee_hello(handshake_info, nonce_session)
+      else
+        handshake_info = client.hello_server(choice)
+        nonce_session = Session.new("server", handshake_info[:client_nonce])    
+        # - send the info for the e2ee
+        client.eee_hello(handshake_info, nonce_session)        
+      end
+  else
+    raise ArgumentError, "non existing choice"
+  end
+end
+  
 
   # - create new ephemeral keys
   # client.create_new_eph_keys()
 
-  # - send the info for the e2ee
-  client.eee_hello(handshake_info, nonce_session)
-  
   # client.ephemeral_keys_update(handshake_info, nonce_session)  
-end
+
 main

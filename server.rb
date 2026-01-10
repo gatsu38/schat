@@ -130,12 +130,12 @@ class SecureServer
     transaction_successful = false
 
     begin
-    raise ProtocolError.new("Invalid registration message size", "\x02" ) unless message.bytesize == 1 + nickname_size + 30
+      raise ProtocolError.new("Invalid registration message size", "\x02" ) unless message.bytesize == 1 + nickname_size + 30
 
-    client_voucher = read_exact(message, offset, 30) 
-    encoded_voucher = client_voucher.force_encoding("UTF-8")
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+      client_voucher = read_exact(message, offset, 30) 
+      encoded_voucher = client_voucher.force_encoding("UTF-8")
+      db = SQLite3::Database.new(DB_FILE)
+      db.results_as_hash = true
 
       db.transaction do
         row_voucher = db.get_first_row(
@@ -145,7 +145,7 @@ class SecureServer
         
         raise ProtocolError.new("Invalid voucher", "\x02") unless row_voucher
         
-        begin    
+        begin
           db.execute(
           "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
           [nickname, client_pk]
@@ -176,36 +176,72 @@ class SecureServer
     db&.close
   end
 
-  def eee_receiver(payload)
+  def eee_receiver(payload, handshake_info)
+      
+    client_pub_key = handshake_info[:client_pk]
     offset = 0
-    public_key = read_exact(payload, offset, 32)
+    
+    eph_pk = read_exact(payload, offset, 32)
     offset += 32
 
     signature_size_packed = read_exact(payload, offset, 2)
     signature_size = signature_size_packed.unpack1("n")
     offset += 2
-
     signature = read_exact(payload, offset, signature_size)
     offset += signature_size
 
+    binding.pry
+    unless client_pub_key.verify(signature, eph_pk)
+      raise ProtocolError, "ephemeral pub key mismatch with signature and client public key"
+    end
+    
     otp_size_packed = read_exact(payload, offset, 4)
     otp_size = otp_size_packed.unpack1("N")
     offset += 4
+
+    raise ProtocolError, "Wrong otp size" unless otp_size 50 * (32 + 1)
 
     unless payload.bytesize == 32 + 2 + signature_size + 4 + otp_size
       raise ProtocolError, "received wrong size for e2ee hello" 
     end
     
     one_time_keys = read_exact(payload, offset, otp_size)  
-    one_time_keys
+    binding.pry
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    binding.pry
+    client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
+      [client_pub_key]
+    )
+
+    raise ProtocolError, "unknown client" unless client_id
+      
+    db.transaction do
+      db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
+        [eph_pk, client_id]
+      )  
+      counter = 0
+      offset_2 = 0
+      50.times do
+        binding.pry
+        otp = read_exact(one_time_keys, offset_2, 32)
+        offset_2 += 32
+        counter_packed = read_exact(one_time_keys, offset_2, 1)
+        counter = counter_packed.unpack1("C")
+        offset_2 += 1
+        db.execute("INSERT INTO one_time_prekeys (opk_pub, counter, client_id) VALUES (?, ?, ?)",
+          [otp, counter, client_id] 
+        )
+      end  
+    end
+  ensure
+  db&.close    
   end
-  
   
   # handles a single client 
   def hello_client(sock)
 
-#    DB = SQLite3::Database.new(DB_FILE)
-#    DB.results_as_hash = true
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key

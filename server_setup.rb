@@ -26,9 +26,9 @@ db.execute <<-SQL
         username NOT GLOB '*[^A-Za-z0-9]*'
       ),
     public_key BLOB NOT NULL CHECK (length(public_key) = 32),
-    signed_prekey_pub BLOB NOT NULL UNIQUE CHECK (length(signed_prekey_pub) = 32),
-    signed_prekey_sig BLOB NOT NULL UNIQUE CHECK (length(signed_prekey_sig) = 32),
-    spk_created_at TIMESTAMP NOT NULL,
+    signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
+    signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_sig) = 32),
+    spk_created_at TIMESTAMP,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 SQL
@@ -38,6 +38,7 @@ db.execute <<-SQL
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id INTEGER NOT NULL,
   opk_pub BLOB NOT NULL UNIQUE CHECK (length(opk_pub) = 32),
+  counter INTEGER NOT NULL,
   used BOOLEAN default false,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 

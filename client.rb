@@ -10,15 +10,20 @@ require 'pry-byebug'
 require 'sqlite3'
 
 # LIST OF FUNCTIONS
-# server_identity_verification
-  # !! verify server identity and connection genuinity !! add server pub key check
-# hello_server method for client
-  # initialize the connection with the server
-# registration_request
-  # send registration request with nickname and voucher
-# registration_builder
-  # build the registration package
-  
+# called during hello_client to check if the public key matches the registered server
+  # server_fingerprint_check(remote_pk)
+# ask the user to provide the server fingerprint, use it later to check the server identity
+  # server_fingerprint_registration() 
+# initialize the connection with the server
+  # hello_server()
+# handles the returned value from the server at the end of the user registration
+  # def registration_confirmation(confirmation_byte)
+# ask the user to provide a valid voucher and also recover the nickname from the db
+  # def registration_request(handshake_info, nonce_session)
+# the hello method that asks the server to save the 
+  # def eee_hello(handshake_info, nonce_session)
+# main method
+  # main()
 DB_FILE = "/home/kali/schat_db/client.db"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
@@ -30,7 +35,8 @@ MSG_SERVER_REGISTRATION_CONFIRMED = "\x05"
 MSG_CLIENT_EPH_KEY_CHECK = "\x06"
 MSG_SERVER_EPH_KEY_CHECK = "\x07" 
 MSG_CLIENT_EEE_HELLO = "\x08"
-SERVER_EEE_HELLO_CONFIRMED = "\X09"
+MSG_CLIENT_EEE_START = "\x09"
+MSG_SERVER_EEE_START_RESPONSE = "\x0a"
 class ProtocolError < StandardError; end
 
 class SecureClient
@@ -59,6 +65,37 @@ class SecureClient
     db&.close    
   end
 
+  # method used to establish a connection with a given user
+  def eee_start(handshake_info, nonce_session)
+    puts "Please provide the username you wish to interact with"
+    username = STDIN.gets.strip    
+
+    username_size = [username.bytesize].pack("C")
+
+    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+
+    username_payload = 
+      MSG_CLIENT_EEE_START + 
+      username_size +
+      username
+
+    sender(sock, safe_box, nonce_session, username_payload)
+
+    # obtain server answer
+    returned_payload = read_blob(sock)
+
+    # decipher server answer
+    plain_text = decipher(returned_payload, safe_box)
+
+    handler_caller(plain_text)
+
+  end
+
+
+  # called during hello_client to check if the public key matches the registered server
   def server_fingerprint_check(remote_pk)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
@@ -118,7 +155,7 @@ class SecureClient
 
 
   # main method
-  def hello_server(msg)
+  def hello_server()
     
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
@@ -172,16 +209,6 @@ class SecureClient
     {client_nonce: client_nonce, server_nonce: server_nonce, client_box: client_box, server_eph_pk: server_eph_pk, server_pk: server_pk, sock: sock}
   end
 
-  # ask the server if there's new messages 
-  def check_messages
-    
-  end
-
-  # inside the contact_list there must be a new contact option and the list of available chats
-  # the existing contacts must have a unique check in case of a new message 
-  def contact_list
-        
-  end
 
   # handles the returned value from the server at the end of the user registration
   def registration_confirmation(confirmation_byte)
@@ -252,51 +279,6 @@ class SecureClient
 
   end
 
-  # used to create new ephemeral keys for future connection
-  def create_new_eph_keys(count = 20)
-
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-
-    db.transaction do
-      count.times do
-        eph_sk = RbNaCl::PrivateKey.generate
-        eph_pk = eph_sk.public_key
-  
-        eph_sk_bytes = eph_sk.to_bytes
-        eph_pk_bytes = eph_pk.to_bytes
-        db.execute(
-          "INSERT INTO ephemeral_keys (ephemeral_private_key, ephemeral_public_key)
-          VALUES (?, ?)",
-          [eph_sk_bytes, eph_pk_bytes]
-        )
-      end
-    end
-  ensure
-    db&.close
-  end
-
-
-  # used to generate, check and update the ephemeral_keys 
-  def ephemeral_keys_update(handshake_info, nonce_session)
-
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
-
-    eph_key_check_payload = MSG_CLIENT_EPH_KEY_CHECK
-
-    sender(sock, safe_box, nonce_session, eph_key_check_payload)
-
-    returned_payload = read_blob(sock)
-
-    plain_text = decipher(returned_payload, safe_box)
-
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-
-  ensure
-    db&.close     
-  end
 
   # the hello method that asks the server to save the 
   def eee_hello(handshake_info, nonce_session)
@@ -331,14 +313,25 @@ class SecureClient
       counter += 1
     end
     # build the payload for e2ee long term public id, the temporary key, the signature and all the one time keys
-    payload = eee_builder(eph_pk_bytes, signed_prekey_sig,  one_time_prekeys)
+    # it is hardcoded for the one time keys to be 50 in total
+    payload = eee_builder(@host_pk.to_bytes, eph_pk_bytes, signed_prekey_sig,  one_time_prekeys, 49)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
 
     message = MSG_CLIENT_EEE_HELLO + payload
     sender(sock, safe_box, nonce_session, message)
+    
     returned_payload = read_blob(sock)
+
+
+    binding.pry
+    # decipher server answer
+    plain_text = decipher(returned_payload, safe_box)
+
+    digest = RbNaCl::Hash.sha256(payload)
+    raise ProtocolError, "Server payload digest mismatch" unless digest == plain_text
+        
   rescue
     db&.close
   end
@@ -351,8 +344,8 @@ include Utils
   puts "Choose an option:"
   puts "1) register server fingerprint on the local db"
   puts "2) register the client with the server"
-  puts "3) Send message"
-  puts "4) Get messages"
+  puts "3) manually share with the server the keys for e2ee"
+  puts "4) obtain the keys for e2ee from a given username"
   choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
 
@@ -365,7 +358,7 @@ include Utils
     when 2
       # -inside handshake info there is all the info concerning the connection:
       # - used to ask the server to register our client nickname and voucher
-      handshake_info = client.hello_server(choice)
+      handshake_info = client.hello_server()
 
       # -create and get the nonce ready
       nonce_session = Session.new("server", handshake_info[:client_nonce])
@@ -375,19 +368,19 @@ include Utils
       if handshake_info && nonce_session
         client.eee_hello(handshake_info, nonce_session)
       else
-
-        handshake_info = client.hello_server(choice)
+        binding.pry
+        handshake_info = client.hello_server()
         nonce_session = Session.new("server", handshake_info[:client_nonce])
-        client.registration_request(handshake_info, nonce_session)
+        client.eee_hello(handshake_info, nonce_session)
       end
     when 4
       if handshake_info && nonce_session
-        client.eee_hello(handshake_info, nonce_session)
+        client.eee_star(handshake_info, nonce_session)
       else
-        handshake_info = client.hello_server(choice)
+        handshake_info = client.hello_server()
         nonce_session = Session.new("server", handshake_info[:client_nonce])    
         # - send the info for the e2ee
-        client.eee_hello(handshake_info, nonce_session)        
+        client.eee_start(handshake_info, nonce_session)        
       end
   else
     raise ArgumentError, "non existing choice"

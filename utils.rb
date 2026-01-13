@@ -12,6 +12,8 @@
 #------      
 # handler_caller
   # reads the message ID and calls the appropriate message handler  
+# eee_receiver(payload, handshake_info)
+  # obtains the keys needed for the e2ee between two clients
 # decipher
   # unbox the messages
 # sender
@@ -90,11 +92,88 @@ MAX_FIELD_SIZE = 1024
       response = registration_confirmation(handled_message)
       when "\x08"
       response = eee_receiver(handled_message, handshake_info)
+      when "\x09"
+      response = eee_start_receiver(handled_message, handshake_info)
+      when "\x0a"
+      response = eee_receiver(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end
   response          
   end
+
+  # obtains the keys needed for the e2ee between two clients
+  def eee_receiver(payload, handshake_info)
+    offset = 0
+
+    client_pub_key_bytes = read_exact(payload, offset, 32)
+    client_pub_key = RbNaCl::Signatures::Ed25519::VerifyKey.new(client_pub_key_bytes)
+    offset += 32
+
+    eph_pk = read_exact(payload, offset, 32)
+    offset += 32
+
+    signature_size_packed = read_exact(payload, offset, 2)
+    signature_size = signature_size_packed.unpack1("n")
+    offset += 2
+    signature = read_exact(payload, offset, signature_size)
+    offset += signature_size
+
+    unless client_pub_key.verify(signature, eph_pk)
+      raise ProtocolError, "ephemeral pub key mismatch with signature and client public key"
+    end
+
+    otp_amount_packed = read_exact(payload, offset, 2)
+    otp_amount = otp_amount_packed.unpack1("n")
+    offset += 2
+
+    otp_size_packed = read_exact(payload, offset, 4)
+    otp_size = otp_size_packed.unpack1("N")
+    offset += 4
+
+    raise ProtocolError, "Wrong otp size" unless otp_size == otp_amount * (32 + 1)
+
+    unless payload.bytesize == 32 + 32 + 2 + signature_size + 2 + 4 + otp_size
+      raise ProtocolError, "received wrong size for e2ee hello"
+    end
+
+    one_time_keys = read_exact(payload, offset, otp_size)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
+      [client_pub_key.to_bytes]
+    )
+
+    raise ProtocolError, "unknown client" unless client_id
+    db.transaction do
+    binding.pry
+      db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
+        [eph_pk,  client_id.to_s]
+      )
+      db.execute("UPDATE clients_info SET signed_prekey_sig = ? WHERE id =?",
+        [signature,  client_id.to_s]
+      )
+
+      counter = 0
+      offset_2 = 0
+      otp_amount.times do
+      binding.pry
+        otp = read_exact(one_time_keys, offset_2, 32)
+        offset_2 += 32
+        counter_packed = read_exact(one_time_keys, offset_2, 1)
+        counter = counter_packed.unpack1("C")
+        offset_2 += 1
+        db.execute("INSERT INTO one_time_prekeys (opk_pub, counter, client_id) VALUES (?, ?, ?)",
+          [otp, counter.to_s, client_id.to_s]
+        )
+      end
+    end
+  digest = RbNaCl::Hash.sha256(payload)
+  ensure
+  db&.close
+  end
+
   
   # unbox the messages
   def decipher(blob, box)

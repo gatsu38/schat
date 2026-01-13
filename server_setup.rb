@@ -27,7 +27,7 @@ db.execute <<-SQL
       ),
     public_key BLOB NOT NULL CHECK (length(public_key) = 32),
     signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
-    signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_sig) = 32),
+    signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_sig IS NULL OR length(signed_prekey_sig) = 64),
     spk_created_at TIMESTAMP,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );

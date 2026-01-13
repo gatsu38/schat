@@ -38,10 +38,9 @@ module Builders
 
   
   # build the payload containing the ephemeral_key, the long term public_key, the one time keys and the signature
-  def eee_builder(eph_key, signature, one_time_keys)
-
+  def eee_builder(host_pk, eph_key, signature, one_time_keys, keys_number)
     one_time_keys_payload = +""
-    (0..49).each do |n|
+    (0..keys_number).each do |n|
       key = one_time_keys[n][:pk]
       counter = [one_time_keys[n][:counter]].pack("C")
       one_time_keys_payload << key
@@ -53,9 +52,11 @@ module Builders
     signature_size = signature.bytesize
     otp_size = one_time_keys_payload.bytesize
       payload =
+        host_pk +
         eph_key +
         [signature_size].pack("n") +
         signature +
+        [keys_number + 1].pack("n") +
         [otp_size].pack("N") +
         one_time_keys_payload    
     payload

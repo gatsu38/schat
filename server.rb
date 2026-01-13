@@ -11,14 +11,18 @@ require 'pry-byebug'
 require 'sqlite3'
 
 # METHODS
-# hello_back_payload_builder
-  # build the hello back payload
 # receive_hello
   # used to receive the hello message from client containing the client nonce
 # hello_client
   # executes the hello client protocol, after this a secret is shared
-# decipher
-  # deciphers the received message
+# registrate_new_user(nickname, handshake_info, db)
+  # register the user on the db with the publik_key
+#  registration_request_handler(message, handshake_info)
+  # handle the registration of a new user
+#  eee_start_receiver(username, handshake_info)
+  # provides a client with the requested keys for the e2ee for a given user
+# handle_client(handshake_info, sock)
+  # this method is used to handle all the messages received from a single client after hello
 # run
   # spawns a new thread for each new client connection
 # shutdown
@@ -39,6 +43,8 @@ MSG_CLIENT_HELLO_ID2 = "\x03"
 MSG_CLIENT_REGISTRATION = "\x04"
 MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
 MSG_CLIENT_EEE_HELLO = "\x08"
+MSG_CLIENT_EEE_START = "\x09"
+MSG_SERVER_EEE_START_RESPONSE = "\x0a"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -93,6 +99,7 @@ class SecureServer
     end
     client_nonce
   end
+
 
   # register the user on the db with the publik_key
   def registrate_new_user(nickname, handshake_info, db)
@@ -176,68 +183,56 @@ class SecureServer
     db&.close
   end
 
-  def eee_receiver(payload, handshake_info)
-      
-    client_pub_key = handshake_info[:client_pk]
+
+  # provides a client with the requested keys for the e2ee for a given user
+  def eee_start_receiver(payload, handshake_info)
     offset = 0
-    
-    eph_pk = read_exact(payload, offset, 32)
-    offset += 32
 
-    signature_size_packed = read_exact(payload, offset, 2)
-    signature_size = signature_size_packed.unpack1("n")
-    offset += 2
-    signature = read_exact(payload, offset, signature_size)
-    offset += signature_size
+    username_header = read_exact(payload, 0, 1)
+    username_size = username_header.unpack1("C")
+    offset += 1
 
-    binding.pry
-    unless client_pub_key.verify(signature, eph_pk)
-      raise ProtocolError, "ephemeral pub key mismatch with signature and client public key"
+    raise ProtocolError, "The provided username size is invalid" unless username_size <= 20
+
+    username = read_exact(payload, offset, username_size).force_encoding("ASCII")
+  
+    unless username.match?(/\A[A-Za-z0-9]{5,20}\z/) 
+      raise ProtocolError, "The provided username does not fit the username criteria" 
     end
-    
-    otp_size_packed = read_exact(payload, offset, 4)
-    otp_size = otp_size_packed.unpack1("N")
-    offset += 4
 
-    raise ProtocolError, "Wrong otp size" unless otp_size 50 * (32 + 1)
-
-    unless payload.bytesize == 32 + 2 + signature_size + 4 + otp_size
-      raise ProtocolError, "received wrong size for e2ee hello" 
-    end
-    
-    one_time_keys = read_exact(payload, offset, otp_size)  
-    binding.pry
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    binding.pry
-    client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
-      [client_pub_key]
+    username_row = db.get_first_row("SELECT * FROM clients_info WHERE username = ?",
+      [username]
     )
-
-    raise ProtocolError, "unknown client" unless client_id
-      
+    id = username_row["id"]
+    public_key = username_row["public_key"]
+    signed_prekey_pub = username_row["signed_prekey_pub"]
+    signed_prekey_sig = username_row["signed_prekey_sig"]
+    binding.pry
     db.transaction do
-      db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
-        [eph_pk, client_id]
-      )  
-      counter = 0
-      offset_2 = 0
-      50.times do
-        binding.pry
-        otp = read_exact(one_time_keys, offset_2, 32)
-        offset_2 += 32
-        counter_packed = read_exact(one_time_keys, offset_2, 1)
-        counter = counter_packed.unpack1("C")
-        offset_2 += 1
-        db.execute("INSERT INTO one_time_prekeys (opk_pub, counter, client_id) VALUES (?, ?, ?)",
-          [otp, counter, client_id] 
-        )
-      end  
+      one_time_key = db.get_first_value("SELECT opk_pub FROM one_time_prekeys WHERE used = 0 AND client_id = ?",
+        [id]
+      )
+      db.execute("UPDATE one_time_prekeys SET used = 1 WHERE opk_pub = ?",
+        [one_time_key]
+      )
     end
+
+    payload = eee_builder(public_key, signed_prekey_pub, signed_prekey_sig, one_time_key, 1)
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+
+    message = MSG_SERVER_EEE_START_RESPONSE + payload
+    sender(sock, safe_box, nonce_session, message)
+    
+
   ensure
-  db&.close    
+    db&.close  
   end
+
   
   # handles a single client 
   def hello_client(sock)

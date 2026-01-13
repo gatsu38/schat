@@ -10,7 +10,8 @@ USER_TABLE = 'user'
 KEYS_TABLE = 'ephemeral_keys'
 SERVER_IDENTITY = 'server_identity'
 SHARED_PREKEY = 'shared_prekey'
-ONE_TIME_KEYS = 'one_time_keys'
+ONE_TIME_KEYS = 'one_time_prekeys'
+CLIENTS_INFO = 'clients_info'
 if File.exist?(DB_FILE)
   puts "Database already exists. Would you like to create a new identity? Y/N"
   answer = gets.chomp.strip.upcase
@@ -22,6 +23,7 @@ begin
 binding.pry
 
   db = SQLite3::Database.new(DB_FILE)
+
 
   # create a table for the current user info
   db.execute <<-SQL
@@ -37,28 +39,22 @@ binding.pry
     );
   SQL
 
-  # create a table for the contacts info
+
   db.execute <<-SQL
-    CREATE TABLE IF NOT EXISTS #{CONTACTS_TABLE} (
+    CREATE TABLE clients_info (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT NOT NULL UNIQUE CHECK (
-        length(username) <= 20 AND 
-        username GLOB '[A-Za-z0-9]*'
+        length(username) BETWEEN 1 AND 20 AND
+        username NOT GLOB '*[^A-Za-z0-9]*'
       ),
       public_key BLOB NOT NULL CHECK (length(public_key) = 32),
-      added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
+      signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_sig) = 32),
+      spk_created_at TIMESTAMP,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   SQL
 
-  # keeps track of the ephemeral public keys shared 
-  db.execute <<-SQL
-    CREATE TABLE IF NOT EXISTS #{KEYS_TABLE} (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ephemeral_private_key BLOB NOT NULL CHECK (length(ephemeral_private_key) = 32),
-      ephemeral_public_key BLOB NOT NULL CHECK (length(ephemeral_public_key) = 32),
-      added_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-  SQL
 
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{SERVER_IDENTITY} (
@@ -70,6 +66,7 @@ binding.pry
     );
   SQL
 
+
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{SHARED_PREKEY} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +75,7 @@ binding.pry
       addet_at DATETIME DEFAULT CURRENT_TIMESTAMP      
     );
   SQL
+
 
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{ONE_TIME_KEYS} (

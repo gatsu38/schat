@@ -104,6 +104,7 @@ MAX_FIELD_SIZE = 1024
 
   # obtains the keys needed for the e2ee between two clients
   def eee_receiver(payload, handshake_info)
+    binding.pry
     offset = 0
 
     client_pub_key_bytes = read_exact(payload, offset, 32)
@@ -141,13 +142,13 @@ MAX_FIELD_SIZE = 1024
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
+    binding.pry
     client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
       [client_pub_key.to_bytes]
     )
 
     raise ProtocolError, "unknown client" unless client_id
     db.transaction do
-    binding.pry
       db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
         [eph_pk,  client_id.to_s]
       )
@@ -158,7 +159,6 @@ MAX_FIELD_SIZE = 1024
       counter = 0
       offset_2 = 0
       otp_amount.times do
-      binding.pry
         otp = read_exact(one_time_keys, offset_2, 32)
         offset_2 += 32
         counter_packed = read_exact(one_time_keys, offset_2, 1)

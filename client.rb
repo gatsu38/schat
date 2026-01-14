@@ -81,7 +81,6 @@ class SecureClient
       MSG_CLIENT_EEE_START + 
       username_size +
       username
-
     sender(sock, safe_box, nonce_session, username_payload)
 
     # obtain server answer
@@ -305,7 +304,7 @@ class SecureClient
 
       sk_bytes = sk.to_bytes
       pk_bytes = pk.to_bytes
-      db.execute("INSERT INTO one_time_keys (one_time_public_key, one_time_private_key, counter) VALUES (?, ?, ?)",
+      db.execute("INSERT INTO one_time_prekeys (one_time_public_key, one_time_private_key, counter) VALUES (?, ?, ?)",
         [pk_bytes, sk_bytes, counter]
       )
       
@@ -325,7 +324,6 @@ class SecureClient
     returned_payload = read_blob(sock)
 
 
-    binding.pry
     # decipher server answer
     plain_text = decipher(returned_payload, safe_box)
 
@@ -368,7 +366,6 @@ include Utils
       if handshake_info && nonce_session
         client.eee_hello(handshake_info, nonce_session)
       else
-        binding.pry
         handshake_info = client.hello_server()
         nonce_session = Session.new("server", handshake_info[:client_nonce])
         client.eee_hello(handshake_info, nonce_session)

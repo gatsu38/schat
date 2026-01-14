@@ -210,25 +210,38 @@ class SecureServer
     public_key = username_row["public_key"]
     signed_prekey_pub = username_row["signed_prekey_pub"]
     signed_prekey_sig = username_row["signed_prekey_sig"]
-    binding.pry
+
+    one_time_key = nil
     db.transaction do
-      one_time_key = db.get_first_value("SELECT opk_pub FROM one_time_prekeys WHERE used = 0 AND client_id = ?",
+      one_time_key = db.get_first_row(
+        <<~SQL,
+          UPDATE one_time_prekeys
+          SET used = 1
+          WHERE id = (
+            SELECT id
+            FROM one_time_prekeys
+            WHERE used = 0 AND client_id = ?
+            LIMIT 1
+          )
+          RETURNING opk_pub, counter
+        SQL
         [id]
       )
-      db.execute("UPDATE one_time_prekeys SET used = 1 WHERE opk_pub = ?",
-        [one_time_key]
-      )
+      raise "No available one-time prekeys" if one_time_key.nil?
     end
+    
+    # prepare the one time key, is a lil messed up to be compatible with the builder which is used by the client as well
+    one_time_prekey = []
+    one_time_key = one_time_key.transform_keys(&:to_sym)
+    one_time_prekey << {pk: one_time_key[:opk_pub], counter: one_time_key[:counter]}
 
-    payload = eee_builder(public_key, signed_prekey_pub, signed_prekey_sig, one_time_key, 1)
+    payload = eee_builder(public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
 
     message = MSG_SERVER_EEE_START_RESPONSE + payload
-    sender(sock, safe_box, nonce_session, message)
-    
-
+    message    
   ensure
     db&.close  
   end
@@ -303,6 +316,20 @@ class SecureServer
     host_pk_hex = host_pk_bytes.unpack1("H*")
     pretty = host_pk_hex.scan(/.{4}/).join(":")
     puts "Server fingerprint: #{pretty}"
+
+    puts "Do you want new vouchers? Y/N"
+    answer_one = gets.chomp.strip.upcase
+    if answer_one == 'Y'
+      generate_vouchers()
+      puts "Do you want to see the available vouchers? Y/N"
+      answer_two = gets.chomp.strip.upcase
+        if answer_two == 'Y'
+          db.execute("SELECT voucher FROM vouchers") do |row|
+            puts row[0]
+          end
+        end
+    end
+    
   ensure
     db&.close
   end  
@@ -464,6 +491,5 @@ end
 
 
 # non necessariamente instanziabile
-#generate_vouchers()
 SecureServer.new(2222).run
 

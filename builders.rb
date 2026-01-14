@@ -17,7 +17,6 @@ module Builders
   # build the registration message
   def registration_builder(nickname, voucher)
     raise ArgumentError, "Nickname too long" if nickname.bytesize > 20
-
     registration_payload =
       MSG_CLIENT_REGISTRATION +
       [nickname.bytesize].pack("C") +
@@ -47,8 +46,6 @@ module Builders
       one_time_keys_payload << counter
     end
 
-    raise ProtocolError, "wrong one time keys payload size" unless one_time_keys_payload.bytesize == 32 * 50 + 50 
-  
     signature_size = signature.bytesize
     otp_size = one_time_keys_payload.bytesize
       payload =

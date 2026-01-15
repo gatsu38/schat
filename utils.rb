@@ -12,7 +12,7 @@
 #------      
 # handler_caller
   # reads the message ID and calls the appropriate message handler  
-# eee_receiver(payload, handshake_info)
+# e2ee_receiver(payload, handshake_info)
   # obtains the keys needed for the e2ee between two clients
 # decipher
   # unbox the messages
@@ -52,6 +52,7 @@ MAX_FIELD_SIZE = 1024
       @counter = 0               
     end
 
+
     # method to be called each time a new message has to be sent
     def next_nonce()
       raise "counter overflow" if @counter >= (1 << 64)
@@ -77,7 +78,9 @@ MAX_FIELD_SIZE = 1024
     def role_byte
       @role == :client ? "\x01" : "\x02"
     end
+  # end of session class
   end
+
 
   # reads the message ID and calls the appropriate message handler
   def handler_caller(message, handshake_info = nil)
@@ -91,21 +94,28 @@ MAX_FIELD_SIZE = 1024
       when "\x05"
       response = registration_confirmation(handled_message)
       when "\x08"
-      response = eee_receiver(handled_message, handshake_info)
+      response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
       when "\x09"
-      response = eee_start_receiver(handled_message, handshake_info)
+      response = e2ee_keys_request_receiver(handled_message, handshake_info)
       when "\x0a"
-      response = eee_receiver(handled_message, handshake_info)
+      response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end
   response          
   end
 
+
   # obtains the keys needed for the e2ee between two clients
-  def eee_receiver(payload, handshake_info)
-    binding.pry
+  def e2ee_keys_share_receiver(payload, handshake_info)
     offset = 0
+    username_size_header = read_exact(payload, offset, 1)
+    username_size = username_size_header.unpack1("C")
+    offset += 1
+    raise ProtocolError unless username_size >= 5 && username_size <= 20
+
+    username = read_exact(payload, offset, username_size)
+    offset += username_size
 
     client_pub_key_bytes = read_exact(payload, offset, 32)
     client_pub_key = RbNaCl::Signatures::Ed25519::VerifyKey.new(client_pub_key_bytes)
@@ -134,44 +144,15 @@ MAX_FIELD_SIZE = 1024
 
     raise ProtocolError, "Wrong otp size" unless otp_size == otp_amount * (32 + 1)
 
-    unless payload.bytesize == 32 + 32 + 2 + signature_size + 2 + 4 + otp_size
+    unless payload.bytesize == 1 + username_size + 32 + 32 + 2 + signature_size + 2 + 4 + otp_size
       raise ProtocolError, "received wrong size for e2ee hello"
     end
 
     one_time_keys = read_exact(payload, offset, otp_size)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
 
-    binding.pry
-    client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
-      [client_pub_key.to_bytes]
-    )
+    e_material = {username: username, pub_key: client_pub_key_bytes, eph_pk: eph_pk, signature: signature, otpk: one_time_keys, otp_amount: otp_amount}
 
-    raise ProtocolError, "unknown client" unless client_id
-    db.transaction do
-      db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
-        [eph_pk,  client_id.to_s]
-      )
-      db.execute("UPDATE clients_info SET signed_prekey_sig = ? WHERE id =?",
-        [signature,  client_id.to_s]
-      )
-
-      counter = 0
-      offset_2 = 0
-      otp_amount.times do
-        otp = read_exact(one_time_keys, offset_2, 32)
-        offset_2 += 32
-        counter_packed = read_exact(one_time_keys, offset_2, 1)
-        counter = counter_packed.unpack1("C")
-        offset_2 += 1
-        db.execute("INSERT INTO one_time_prekeys (opk_pub, counter, client_id) VALUES (?, ?, ?)",
-          [otp, counter.to_s, client_id.to_s]
-        )
-      end
-    end
-  digest = RbNaCl::Hash.sha256(payload)
-  ensure
-  db&.close
+    e_material
   end
 
   
@@ -193,7 +174,6 @@ MAX_FIELD_SIZE = 1024
     plain_text = box.open(nonce, cipher)
     plain_text
   end
-
 
 
   # cipher the content, pack it with the nonce, send it, update nonce, get confirmation
@@ -371,6 +351,7 @@ MAX_FIELD_SIZE = 1024
     true
 
   end
+
 
 end
 

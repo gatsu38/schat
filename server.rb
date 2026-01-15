@@ -19,7 +19,7 @@ require 'sqlite3'
   # register the user on the db with the publik_key
 #  registration_request_handler(message, handshake_info)
   # handle the registration of a new user
-#  eee_start_receiver(username, handshake_info)
+#  e2ee_server_request_receiver(username, handshake_info)
   # provides a client with the requested keys for the e2ee for a given user
 # handle_client(handshake_info, sock)
   # this method is used to handle all the messages received from a single client after hello
@@ -42,9 +42,9 @@ MSG_SERVER_HELLO_ID = "\x02"
 MSG_CLIENT_HELLO_ID2 = "\x03"
 MSG_CLIENT_REGISTRATION = "\x04"
 MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
-MSG_CLIENT_EEE_HELLO = "\x08"
-MSG_CLIENT_EEE_START = "\x09"
-MSG_SERVER_EEE_START_RESPONSE = "\x0a"
+MSG_CLIENT_E2EE_KEYS_SHARE = "\x08"
+MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
+MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -62,43 +62,6 @@ end
 class SecureServer
   include Utils
   include Builders
-
-  # usfed to receive the hello message from client   
-  def receive_hello(sock)
-    puts "receive hello nonce"
-    blob = read_blob(sock)
-    raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 15
-    offset = 0
-
-    # 1) Read protocol name
-    raise IOError, "Blob too short for protocol name" if blob.bytesize < offset
-    client_protocol_name = read_exact(blob, 0, 30)
-    offset += 30
-
-    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
-
-    unless client_protocol_name == protocol_start
-      raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
-    end
-
-    # 2) Read message type (1 byte)
-    raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
-    msg_type = blob.getbyte(offset)
-    offset += 1
-
-    unless msg_type == MSG_CLIENT_HELLO_ID.getbyte(0)
-      raise IOError, "Unexpected message type: #{msg_type}"
-    end
-
-    # 3) Remaining bytes are the nonce
-    client_nonce = read_exact(blob, offset, 15)
-
-    # Optional sanity check
-    unless client_nonce.bytesize == 15
-      raise IOError, "Invalid nonce size: #{nonce.bytesize}"
-    end
-    client_nonce
-  end
 
 
   # handle the registration of a new user
@@ -167,9 +130,57 @@ class SecureServer
     db&.close
   end
 
+  # wrapper around the e2ee receiver to make the checks 
+  def e2ee_server_share_receiver_wrapper(payload, handshake_info)
+    e_material = e2ee_keys_share_receiver(payload, handshake_info)
+ 
+    username = e_material[:username]
+    client_pub_key = e_material[:pub_key]
+    eph_pk = e_material[:eph_pk]
+    signature = e_material[:signature]
+    one_time_keys = e_material[:otpk]
+    otp_amount = e_material[:otp_amount]
+    
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    begin
+      client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
+        [client_pub_key]
+      )
+
+      db.transaction do
+        db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
+          [eph_pk,  client_id]
+        )
+        db.execute("UPDATE clients_info SET signed_prekey_sig = ? WHERE id =?",
+          [signature,  client_id]
+        )
+
+        counter = 0
+        offset_2 = 0
+        otp_amount.times do
+          otp = read_exact(one_time_keys, offset_2, 32)
+          offset_2 += 32
+          counter_packed = read_exact(one_time_keys, offset_2, 1)
+          counter = counter_packed.unpack1("C")
+          offset_2 += 1
+          db.execute("INSERT INTO one_time_prekeys (opk_pub, counter, client_id) VALUES (?, ?, ?)",
+            [otp, counter, client_id]
+          )
+        end
+      end
+    rescue
+      raise ProtocolError, "Couldn't update the database with the e2ee material"
+    end
+    digest = RbNaCl::Hash.sha256(payload)
+    digest
+  ensure
+    db&.close
+  end
 
   # provides a client with the requested keys for the e2ee for a given user
-  def eee_start_receiver(payload, handshake_info)
+  def e2ee_keys_request_receiver(payload, handshake_info)
     offset = 0
 
     username_header = read_exact(payload, 0, 1)
@@ -191,6 +202,7 @@ class SecureServer
       [username]
     )
     id = username_row["id"]
+    username = username_row["username"]
     public_key = username_row["public_key"]
     signed_prekey_pub = username_row["signed_prekey_pub"]
     signed_prekey_sig = username_row["signed_prekey_sig"]
@@ -219,106 +231,19 @@ class SecureServer
     one_time_key = one_time_key.transform_keys(&:to_sym)
     one_time_prekey << {pk: one_time_key[:opk_pub], counter: one_time_key[:counter]}
 
-    payload = eee_builder(public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
+    payload = e2ee_builder(username, public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
 
-    message = MSG_SERVER_EEE_START_RESPONSE + payload
+    message = MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE + payload
     message    
   ensure
     db&.close  
   end
 
   
-  # handles a single client 
-  def hello_client(sock)
-
-    # Ephemeral X25519 server key pair, one pair per client
-    eph_sk = RbNaCl::PrivateKey.generate
-    eph_pk = eph_sk.public_key
-    # receive client's first protocol connection: just a nonce "client hello"
-    puts "receive client's nonce"
-    client_nonce = receive_hello(sock)
-
-    # creates the server_nonce
-    server_nonce = RbNaCl::Random.random_bytes(15)
-    
-    # create a signature only valid for that nonce
-    signature = sig_builder(client_nonce, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)
-
-    # create the payload to be sent together with the signature in order
-    # for the client to verify the server's authenticity 
-    hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)    
-
-    # send the hello back containing the signature and the server nonce among other
-    puts "send hello back"
-    write_all(sock, hello_back_payload)
-
-    # receive the signature and what's required to verify it
-    puts "waiting for the client's signature"
-    client_hello_back_payload = read_blob(sock)
-
-    # create the protocol name + padding
-    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
-
-    # verify client's identity and obtain keys
-    client_info = peer_identity_verification(server_nonce, protocol_start, client_hello_back_payload, "client", MSG_CLIENT_HELLO_ID2)
-
-    client_pk = client_info[:remote_pk]
-    
-    client_eph_pk = client_info[:remote_eph_pk]    
-    server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
-    {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
-  end
-
-
-  # create a Ed25519 private key (signing key)
-  # used to sign the server's ephimeral public key
-  # @host_pk contains the derived public key
-  # !!!!!!!! this part has to be changed for proper host key handling !!!!!!!!
-  # !!!!!!!! TO FIX !!!!!!!!!
-  def initialize(port)
-    # ip port and max number of threads
-    @port = port
-    @pool = Concurrent::FixedThreadPool.new(20)
-
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-
-    host_row = db.get_first_row("SELECT private_key, public_key FROM host_keys")
-
-    raise ProtocolError, "No host key found" unless host_row
-    
-    # Long-term host key (Ed25519)
-    host_sk_bytes = host_row["private_key"]
-    host_pk_bytes = host_row["public_key"]
-
-    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
-    @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
-
-    host_pk_hex = host_pk_bytes.unpack1("H*")
-    pretty = host_pk_hex.scan(/.{4}/).join(":")
-    puts "Server fingerprint: #{pretty}"
-
-    puts "Do you want new vouchers? Y/N"
-    answer_one = gets.chomp.strip.upcase
-    if answer_one == 'Y'
-      generate_vouchers()
-      puts "Do you want to see the available vouchers? Y/N"
-      answer_two = gets.chomp.strip.upcase
-        if answer_two == 'Y'
-          db.execute("SELECT voucher FROM vouchers") do |row|
-            puts row[0]
-          end
-        end
-    end
-    
-  ensure
-    db&.close
-  end  
-
-  # this method is used to handle all the messages received from a single client after hello
+  # this method is used to handle all the messages received from a single client after the hello client
   def handle_client(handshake_info, sock)
 
     server_nonce = handshake_info[:server_nonce]
@@ -349,7 +274,88 @@ class SecureServer
     end
   end
 
-  # handles the incoming connections 
+  # usfed to receive the hello message from client, called from hello_client
+  def receive_hello(sock)
+    puts "receive hello nonce"
+    blob = read_blob(sock)
+    raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 15
+    offset = 0
+
+    # 1) Read protocol name
+    raise IOError, "Blob too short for protocol name" if blob.bytesize < offset
+    client_protocol_name = read_exact(blob, 0, 30)
+    offset += 30
+
+    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+    unless client_protocol_name == protocol_start
+      raise IOError, "Protocol mismatch: #{protocol_id.inspect}"
+    end
+
+    # 2) Read message type (1 byte)
+    raise IOError, "Blob too short for message type" if blob.bytesize < offset + 1
+    msg_type = blob.getbyte(offset)
+    offset += 1
+
+    unless msg_type == MSG_CLIENT_HELLO_ID.getbyte(0)
+      raise IOError, "Unexpected message type: #{msg_type}"
+    end
+
+    # 3) Remaining bytes are the nonce
+    client_nonce = read_exact(blob, offset, 15)
+
+    # Optional sanity check
+    unless client_nonce.bytesize == 15
+      raise IOError, "Invalid nonce size: #{nonce.bytesize}"
+    end
+    client_nonce
+  end
+
+
+  # handles a single client, used to establish a safe channel with a single client, returns the handshake info
+  def hello_client(sock)
+
+    # receive client's first protocol connection: just a nonce "client hello"
+    puts "receive client's nonce"
+    client_nonce = receive_hello(sock)
+
+    # Ephemeral X25519 server key pair, one pair per client
+    eph_sk = RbNaCl::PrivateKey.generate
+    eph_pk = eph_sk.public_key
+
+
+    # creates the server_nonce
+    server_nonce = RbNaCl::Random.random_bytes(15)
+
+    # create a signature only valid for that nonce
+    signature = sig_builder(client_nonce, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)
+
+    # create the payload to be sent together with the signature in order
+    # for the client to verify the server's authenticity 
+    hello_back_payload = hello_back_payload_builder(signature, eph_pk, server_nonce, "server", MSG_SERVER_HELLO_ID)
+
+    # send the hello back containing the signature and the server nonce among other
+    puts "send hello back"
+    write_all(sock, hello_back_payload)
+
+    # receive the signature and what's required to verify it
+    puts "waiting for the client's signature"
+    client_hello_back_payload = read_blob(sock)
+
+    # create the protocol name + padding
+    protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
+
+    # verify client's identity and obtain keys
+    client_info = peer_identity_verification(server_nonce, protocol_start, client_hello_back_payload, "client", MSG_CLIENT_HELLO_ID2)
+
+    client_pk = client_info[:remote_pk]
+
+    client_eph_pk = client_info[:remote_eph_pk]
+    server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
+    {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
+  end
+
+
   # spawns a new thread for each new client connection
   def run
     begin
@@ -425,6 +431,48 @@ class SecureServer
     end
   end
 
+  # initialize the server class
+  def initialize(port)
+    # ip port and max number of threads
+    @port = port
+    @pool = Concurrent::FixedThreadPool.new(20)
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    host_row = db.get_first_row("SELECT private_key, public_key FROM host_keys")
+
+    raise ProtocolError, "No host key found" unless host_row
+
+    # Long-term host key (Ed25519)
+    host_sk_bytes = host_row["private_key"]
+    host_pk_bytes = host_row["public_key"]
+
+    @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
+    @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
+
+    host_pk_hex = host_pk_bytes.unpack1("H*")
+    pretty = host_pk_hex.scan(/.{4}/).join(":")
+    puts "Server fingerprint: #{pretty}"
+
+    puts "Do you want new vouchers? Y/N"
+    answer_one = gets.chomp.strip.upcase
+    if answer_one == 'Y'
+      generate_vouchers()
+      puts "Do you want to see the available vouchers? Y/N"
+      answer_two = gets.chomp.strip.upcase
+        if answer_two == 'Y'
+          db.execute("SELECT voucher FROM vouchers WHERE used_at IS NULL") do |row|
+            puts row[0]
+          end
+        end
+    end
+
+  ensure
+    db&.close
+  end
+
+# end of the server class
 end
 
 # generate vouchers to be used by clients to register

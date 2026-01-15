@@ -43,13 +43,14 @@ binding.pry
   db.execute <<-SQL
     CREATE TABLE clients_info (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE CHECK (
+      username TEXT UNIQUE CHECK (
         length(username) BETWEEN 1 AND 20 AND
         username NOT GLOB '*[^A-Za-z0-9]*'
       ),
-      public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+      public_key BLOB NOT NULL UNIQUE CHECK (length(public_key) = 32),
       signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
-      signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_sig) = 32),
+      signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_sig IS NULL OR length(signed_prekey_sig) = 64),
+      one_time_key BLOB UNIQUE CHECK (one_time_key IS NULL OR length(one_time_key) = 32),
       spk_created_at TIMESTAMP,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );

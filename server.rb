@@ -101,22 +101,6 @@ class SecureServer
   end
 
 
-  # register the user on the db with the publik_key
-  def registrate_new_user(nickname, handshake_info, db)
-    #db = SQLite3::Database.new(DB_FILE)
-    #db.results_as_hash = true
-
-    client_pk = handshake_info[:client_pk].to_bytes        
-
-    db.execute(
-      "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
-      [nickname, client_pk]
-    )
-
-    raise ProtocollError, "voucher update on db: ERROR" unless db.changes == 1
-    
-  end
-
   # handle the registration of a new user
   def registration_request_handler(message, handshake_info)
     offset = 0

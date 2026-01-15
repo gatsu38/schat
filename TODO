@@ -1,6 +1,6 @@
 ADD password to the registration process
 
-check github
+check github2
 increment counters for every BlobTimeoutError/BlobEOFError. That lets you detect attacks or flakey clients.
 add ensure to tell client the server raised an error during payload transfer
 chatgpt chat (server authentication methods) make sure the private/public key pair for server identification is managed safely

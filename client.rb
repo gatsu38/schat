@@ -10,6 +10,8 @@ require 'pry-byebug'
 require 'sqlite3'
 
 # LIST OF FUNCTIONS
+# the first method called to send a message to another client: computes the shared secret root key
+  # e2ee_root_key
 # called during hello_client to check if the public key matches the registered server
   # server_fingerprint_check(remote_pk)
 # ask the user to provide the server fingerprint, use it later to check the server identity
@@ -37,24 +39,158 @@ MSG_SERVER_EPH_KEY_CHECK = "\x07"
 MSG_CLIENT_E2EE_KEYS_SHARE = "\x08"
 MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
 MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
+MSG_CLIENT_E2EE_FIRST_MESSAGE = "\x0b"
+MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
 class ProtocolError < StandardError; end
 
 class SecureClient
 
   include Utils
   include Builders
-  
 
+  def e2ee_send_first_message(handshake_info, nonce_session, secret_root_box)
+    
+  end
+
+
+  # receive the first message from a different client
+  def e2ee_first_client_to_client(message, handshake_info)
+    offset = 0
+
+    remote_id_pub_key = read_exact(message, offset, 32)
+    offset += 32
+
+    remote_eph_pub_key = read_exact(message, offset, 32)
+    offset += 32
+
+    one_time_pub_key = read_exact(message, offset, 32)
+    offset += 32
+
+    signature_size_header = read_exact(message, offset, 2)
+    signature_size = signature_size_header.unpack1("n")
+    offset += 2
+
+    nonce_size_header = read_exact(message, offset, 2)
+    nonce_size = nonce_size_header.unpack1("n")
+    offset += 2
+
+    ciphertext_size_header = read_exact(message, offset, 4)
+    ciphertext_size = ciphertext_size_header.unpack1("N")
+    offset += 4
+
+    unless message.bytesize == ciphertext_size + nonce_size + signature_size + 32 + 32 + 32 + 2 + 2 + 4
+      raise ProtocolError, "Declared and received size mismatch"
+    end
+
+    signature = read_exact(message, offset, signature_size)
+    offset += signature_size
+
+    nonce = read_exact(message, offset, nonce_size)
+    offset += nonce_size
+
+    ciphertext = read_exact(message, offset, ciphertext_size)
+  end
+
+
+  # the first method called to send a message to another client: derives the root key
+  def e2ee_root_key(handshake_info, nonce_session)
+    puts "Please provide the username you wish to interact with"
+    username = STDIN.gets.strip
+
+    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+
+    begin
+      db = SQLite3::Database.new(DB_FILE)
+      db.results_as_hash = true
+
+      client_info = db.get_first_row("SELECT * FROM clients_info WHERE username = ?", [username])      
+      raise "No username found with name #{username}" unless client_info
+      remote_id_pub_key = client_info["public_key"]
+      remote_eph_pub_key = client_info["signed_prekey_pub"]
+      remote_ot_pub_key = client_info["one_time_key"]
+
+      keys = db.get_first_row(<<-SQL)
+        SELECT private_signed_prekey AS priv, public_signed_prekey AS pub FROM shared_prekey;
+      SQL
+
+      raise "Missing keys" unless keys
+      local_eph_pub_key = keys["pub"]
+      local_eph_pri_key = keys["priv"]
+
+      identity_secret = dh(remote_id_pub_key, @host_sk.to_bytes)
+      session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
+      one_time_secret = dh(remote_ot_pub_key, local_eph_pri_key)
+
+      combined_secrets = identity_secret + session_secret + one_time_secret
+      root_key = RbNaCl::Hash.sha256(combined_secrets)
+      secret_root_box = RbNaCl::SecretBox.new(root_key)
+
+    rescue
+      raise ProtocolError, "Something wrong happened with the shared secrets creation."
+    end
+
+
+    nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
+    nonce_size = [nonce.bytesize].pack("n")
+    ciphertext = secret_root_box.encrypt(nonce, payload)
+    ciphertext_size = [ciphertext.bytesize].pack("N")
+
+    signature = @host_sk.sign(local_eph_pub_key)
+    signature_size = [signature.bytesize].pack("n")
+    payload =
+      @host_pk.to_bytes +
+      local_eph_pub_key +
+      remote_ot_pub_key +
+      signature_size +
+      nonce_size +
+      ciphertext_size +
+      signature +
+      nonce +
+      ciphertext
+    
+    sock = handshake_info[:sock]
+    server_box = handshake_info[:client_box]
+
+    username_size = [username.bytesize].pack("C")
+    payload_size = [payload.bytesize].pack("N")
+
+    message = 
+      MSG_CLIENT_E2EE_FIRST_MESSAGE +
+      username_size +
+      payload_size +
+      username +
+      payload
+    binding.pry
+    sender(sock, server_box, nonce_session, message)
+
+    # obtain server answer
+    returned_payload = read_blob(sock)
+
+    # decipher server answer
+    plain_text = decipher(returned_payload, server_box)
+
+    response = handler_caller(plain_text)
+    
+    rescue
+      raise ProtocolError, "Something wrong happened with the shared secrets creation."
+    end
+    
+  rescue
+    db&.close
+  end
+
+  
   # wrapper around the receiver for the e2ee material 
   def e2ee_client_share_receiver_wrapper(payload, handshake_info)
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
 
-    username = e_material[:username]
+    username = e_material[:username].force_encoding("UTF-8")
     client_pub_key = e_material[:pub_key]
     eph_pk = e_material[:eph_pk]
     signature = e_material[:signature]
     one_time_keys = e_material[:otpk]
     otp_amount = e_material[:otp_amount]
+
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
@@ -63,7 +199,6 @@ class SecureClient
     otp = read_exact(one_time_keys, 0, 32)
     counter_packed = read_exact(one_time_keys, 32, 1)
     counter = counter_packed.unpack1("C")
-    binding.pry
     begin
       db.transaction do
       db.execute(
@@ -119,7 +254,7 @@ class SecureClient
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
 
-    eph_sk_bytes = eph_pk.to_bytes
+    eph_sk_bytes = eph_sk.to_bytes
     eph_pk_bytes = eph_pk.to_bytes
 
     signed_prekey_sig = @host_sk.sign(eph_pk_bytes)
@@ -334,10 +469,10 @@ class SecureClient
   def server_fingerprint_registration()
     while true
       puts "please insert the server fingerprint"
-      fingerprint = gets&.strip
+      fingerprint = gets&.strip.force_encoding("UTF-8")
       puts "please give a name to the server, (only used locally for identification)"
       puts "maximum size 20 characters and only alphanumerical allowed "
-      server_name = gets&.strip
+      server_name = gets&.strip.force_encoding("UTF-8")
 
       if server_name&.match?(/\A[A-Za-z0-9]{1,20}\z/) && fingerprint&.match?(/\A(?:[a-f0-9]{4}:){15}[a-f0-9]{4}\z/)
         break
@@ -380,7 +515,6 @@ class SecureClient
 
     @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
     @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
-
   ensure
     db&.close
   end
@@ -396,6 +530,7 @@ include Utils
   puts "2) register the client with the server"
   puts "3) manually share with the server the keys for e2ee"
   puts "4) obtain the keys for e2ee for a given username"
+  puts "5) Starts communication with a given username"
   choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
 
@@ -430,15 +565,16 @@ include Utils
         nonce_session = Session.new("server", handshake_info[:client_nonce])    
         client.e2ee_keys_request(handshake_info, nonce_session)        
       end
+    when 5
+      if handshake_info && nonce_session
+    else
+      handshake_info = client.hello_server()
+      nonce_session = Session.new("server", handshake_info[:client_nonce])
+      client.e2ee_root_key(handshake_info, nonce_session)
+    end
   else
     raise ArgumentError, "non existing choice"
   end
 end
   
-
-  # - create new ephemeral keys
-  # client.create_new_eph_keys()
-
-  # client.ephemeral_keys_update(handshake_info, nonce_session)  
-
 main

@@ -6,18 +6,17 @@ DB_FILE = '/home/kali/schat_db/schat.db'
 CLIENTS_INFO = 'clients_info'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
-CLIENTS_PUB_EPHEMERAL_KEYS = 'clients_eph_pub_keys'
+MESSAGES = 'messages'
 NONCES = 'nonces'
 VOUCHERS = 'vouchers'
-SERVER_INFO = 'server_info'
 PREKEYS = 'one_time_prekeys'
-#if File.exist?(DB_FILE)
-#  puts "Database already exists. Exiting"
-#  exit
-#end
+
+# fix the db file
+#
 
 db = SQLite3::Database.new(DB_FILE)
 
+# contains all the info about a client included the keys for e2ee client to client
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{CLIENTS_INFO} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +32,8 @@ db.execute <<-SQL
   );
 SQL
 
+
+# these are the one time keys of all clients
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{PREKEYS} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,19 +49,35 @@ db.execute <<-SQL
   );
 SQL
 
+
+# contains the clients messages
 db.execute <<-SQL
-  CREATE TABLE IF NOT EXISTS #{CLIENTS_PUB_EPHEMERAL_KEYS} (
+  CREATE TABLE IF NOT EXISTS #{MESSAGES} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ephemeral_public_key BLOB NOT NULL CHECK (length(ephemeral_public_key) = 32),
-    client_id INTEGER NOT NULL,
+    recipient_id INTEGER NOT NULL,
+    sender_id INTEGER NOT NULL,
+    message BLOB NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
-    FOREIGN KEY (client_id)
+    FOREIGN KEY (recipient_id)
+      REFERENCES clients_info(id)
+      ON DELETE CASCADE,
+
+    FOREIGN KEY (sender_id)
       REFERENCES clients_info(id)
       ON DELETE CASCADE
   );
 SQL
 
+
+# creates an indexing table for fast messages access
+db.execute <<-SQL
+  CREATE INDEX IF NOT EXISTS idx_messages_recipient
+  ON #{MESSAGES}(recipient_id);
+SQL
+
+
+# contains the nonces for client to server communication
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{NONCES} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +86,8 @@ db.execute <<-SQL
   );
 SQL
 
+
+# the vouchers for user registration
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{VOUCHERS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +98,8 @@ db.execute <<-SQL
   );
 SQL
 
+
+# the long term keys for the server
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{HOST_KEYS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +109,8 @@ db.execute <<-SQL
   );
 SQL
 
+
+# the ephemeral keys for the server
 db.execute <<-SQL
   CREATE TABLE IF NOT EXISTS #{EPH_HOST_KEYS} (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

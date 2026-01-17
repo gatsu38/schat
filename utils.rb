@@ -10,6 +10,8 @@
   # next_nonce
     # method to be called each time a new message has to be sent
 #------      
+# dh
+  # takes a public and a private key and returns the shared secret, is a helper function, a wrapper
 # handler_caller
   # reads the message ID and calls the appropriate message handler  
 # e2ee_receiver(payload, handshake_info)
@@ -81,6 +83,16 @@ MAX_FIELD_SIZE = 1024
   # end of session class
   end
 
+  # helper wrapper to obtain the shared secret from two keys
+  def dh(public_key, private_key)
+    box = RbNaCl::Box.new(public_key, private_key)
+
+    out = "\x00" * 32
+    returned = box.crypto_box_curve25519xsalsa20poly1305_beforenm(out, public_key, private_key)
+    raise "Shared secret creation failed" unless returned == 0
+    out
+  end
+
 
   # reads the message ID and calls the appropriate message handler
   def handler_caller(message, handshake_info = nil)
@@ -99,6 +111,8 @@ MAX_FIELD_SIZE = 1024
       response = e2ee_keys_request_receiver(handled_message, handshake_info)
       when "\x0a"
       response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
+      when "\x0b"
+      response = e2ee_client_first_message_receiver(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end

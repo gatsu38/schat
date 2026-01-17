@@ -3,7 +3,7 @@ require 'sqlite3'
 require 'rbnacl'
 require 'pry'
 require 'pry-byebug'
-# !!!! FIXARE IL PATH
+# !!!! FIX PATH
 DB_FILE = File.expand_path('/home/kali/schat_db/client.db')
 CONTACTS_TABLE = 'contacts'
 USER_TABLE = 'user'

@@ -45,6 +45,8 @@ MSG_SERVER_REGISTRATION_RESPONSE = "\x05"
 MSG_CLIENT_E2EE_KEYS_SHARE = "\x08"
 MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
 MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
+MSG_CLIENT_E2EE_FIRST_MESSAGE = "\x0b"
+MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -63,17 +65,53 @@ class SecureServer
   include Utils
   include Builders
 
+  def e2ee_client_first_message_receiver(message, handshake_info)
+    offset = 0
+    
+    username_size_header = read_exact(message, offset, 1)
+    username_size = username_size.unpack1("C")
+    offset += 1
 
+    payload_size_header = read_exact(message, offset, 4)
+    payload_size = payload_size.unpack1("N")
+    offset += 4
+    
+    unless message.bytesize == username_size + payload_size + 4 + 1
+      raise ProtocolError "Mismatch size between received and declared"
+    end
+
+    username = read_exact(message, offset, username_size)
+    offset += username_size
+
+    payload = read_exact(message, offset, payload_size)
+
+    sender = handshake_info[:client_pk].to_bytes
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    begin
+      db.transaction do
+        db.execute(<<~SQL
+          INSERT INTO
+      end
+    rescue  
+      raise ProtocolError, "Something wrong happened operating the database"
+    end
+  rescue
+  db&.close  
+  end
+
+  
   # handle the registration of a new user
   def registration_request_handler(message, handshake_info)
     offset = 0
-    client_pk = handshake_info[:client_pk].to_bytes\
+    client_pk = handshake_info[:client_pk].to_bytes
 
     nickname_header = read_exact(message, offset, 1)
     nickname_size = nickname_header.unpack1("C")
     offset += 1
     
-    nickname = read_exact(message, offset, nickname_size).force_encoding("ASCII")
+    nickname = read_exact(message, offset, nickname_size).force_encoding("UTF-8")
 
     unless nickname.is_a?(String) && nickname.match?(/\A[A-Za-z0-9]{1,20}\z/)
       response_payload = registration_response_builder("\x04")
@@ -94,7 +132,7 @@ class SecureServer
       db.transaction do
         row_voucher = db.get_first_row(
           "SELECT id FROM vouchers WHERE voucher = ? AND used_at IS NULL",
-          client_voucher
+          encoded_voucher
         )
         
         raise ProtocolError.new("Invalid voucher", "\x02") unless row_voucher
@@ -130,6 +168,7 @@ class SecureServer
     db&.close
   end
 
+
   # wrapper around the e2ee receiver to make the checks 
   def e2ee_server_share_receiver_wrapper(payload, handshake_info)
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
@@ -148,7 +187,6 @@ class SecureServer
       client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
         [client_pub_key]
       )
-
       db.transaction do
         db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
           [eph_pk,  client_id]
@@ -156,7 +194,6 @@ class SecureServer
         db.execute("UPDATE clients_info SET signed_prekey_sig = ? WHERE id =?",
           [signature,  client_id]
         )
-
         counter = 0
         offset_2 = 0
         otp_amount.times do
@@ -189,7 +226,7 @@ class SecureServer
 
     raise ProtocolError, "The provided username size is invalid" unless username_size <= 20
 
-    username = read_exact(payload, offset, username_size).force_encoding("ASCII")
+    username = read_exact(payload, offset, username_size).force_encoding("UTF-8")
   
     unless username.match?(/\A[A-Za-z0-9]{5,20}\z/) 
       raise ProtocolError, "The provided username does not fit the username criteria" 
@@ -322,7 +359,6 @@ class SecureServer
     # Ephemeral X25519 server key pair, one pair per client
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-
 
     # creates the server_nonce
     server_nonce = RbNaCl::Random.random_bytes(15)
@@ -492,11 +528,13 @@ def generate_vouchers()
   db = SQLite3::Database.new(DB_FILE)
   db.results_as_hash = true
   
-  unused_count = db.get_first_value(<<-SQL)
-    SELECT COUNT(*) FROM vouchers WHERE used_at IS NULL;
+  unused_count = db.get_first_value(
+  <<~SQL
+    SELECT COUNT (*) FROM vouchers WHERE used_at IS NULL;
   SQL
+  )
 
-  insert_stmt = db.prepare <<-SQL
+  insert_stmt = db.prepare <<~SQL
     INSERT INTO vouchers (voucher) VALUES (?);
   SQL
   
@@ -505,7 +543,7 @@ def generate_vouchers()
   n.times do
     seed = RbNaCl::Random.random_bytes(32)
     seed_hash = RbNaCl::Hash.sha256(seed)
-    voucher = seed_hash.unpack1("H*")[0, 30]
+    voucher = seed_hash.unpack1("H*")[0, 30].force_encoding("UTF-8")
 
     begin
       insert_stmt.execute(voucher)

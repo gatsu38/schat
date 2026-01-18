@@ -112,7 +112,9 @@ MAX_FIELD_SIZE = 1024
       when "\x0a"
       response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
       when "\x0b"
-      response = e2ee_client_first_message_receiver(handled_message, handshake_info)
+      response = e2ee_message_receiver(handled_message, handshake_info)
+      when "\x0d"
+      response = e2ee_message_harvester(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end
@@ -191,9 +193,9 @@ MAX_FIELD_SIZE = 1024
 
 
   # cipher the content, pack it with the nonce, send it, update nonce, get confirmation
-  def sender(sock, box, nonce_session, payload)
+  def sender(sock, box, nonce_session, message)
     nonce = nonce_session.next_nonce
-    ciphertext = box.box(nonce, payload)
+    ciphertext = box.box(nonce, message)
 
     payload =
       nonce +

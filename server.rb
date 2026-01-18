@@ -47,6 +47,8 @@ MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
 MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
 MSG_CLIENT_E2EE_FIRST_MESSAGE = "\x0b"
 MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
+MSG_CLIENT_E2EE_ASK_MESSAGES = "\x0d"
+MSG_SERVER_E2EE_DELIVER_MESSAGES = "\x0e"
 # used for error handling
 class BlobReadError < StandardError; end
 class BlobSizeError < BlobReadError; end
@@ -65,15 +67,63 @@ class SecureServer
   include Utils
   include Builders
 
-  def e2ee_client_first_message_receiver(message, handshake_info)
+  # forward messages to the requester
+  def e2ee_message_harvester(message, handshake_info)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+    client_pk = handshake_info[:client_pk].to_bytes
+    rows = nil
+    begin
+      db.transaction do
+        client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?", client_pk)
+        
+        rows = db.execute(<<~SQL, client_id)
+          SELECT m.message, c.username AS sender_username
+          FROM messages m
+          JOIN clients_info c ON m.sender_id = c.id
+          WHERE m.recipient_id = ?
+          ORDER by m.created_at;
+        SQL
+      end
+    rescue
+      raise ProtocolError, "Something wrong happened during db work"
+    end
+
+    rows_count = [rows.length].pack("n")
+    payload =""
+    payload << rows_count
+    rows.each do |row|
+      username_size = [row["sender_username"].bytesize].pack("C")
+      message_size = [row["message"].bytesize].pack("N")
+      blob_size_header = row["message"].bytesize + row["sender_username"].bytesize 
+      blob_size = [blob_size_header].pack("N")
+      payload <<
+        blob_size +
+        username_size +
+        message_size +
+        row["sender_username"] +
+        row["message"]
+    end
+    binding.pry    
+    payload
+    binding.pry
+  ensure
+    db&.close
+  end
+
+  # receive and save a message on the db
+  def e2ee_message_receiver(message, handshake_info)
     offset = 0
     
     username_size_header = read_exact(message, offset, 1)
-    username_size = username_size.unpack1("C")
+    username_size = username_size_header.unpack1("C")
     offset += 1
 
     payload_size_header = read_exact(message, offset, 4)
-    payload_size = payload_size.unpack1("N")
+    payload_size = payload_size_header.unpack1("N")
     offset += 4
     
     unless message.bytesize == username_size + payload_size + 4 + 1
@@ -81,18 +131,27 @@ class SecureServer
     end
 
     username = read_exact(message, offset, username_size)
+    recipient = username.force_encoding("UTF-8")
     offset += username_size
 
     payload = read_exact(message, offset, payload_size)
 
-    sender = handshake_info[:client_pk].to_bytes
+    sender_pk = handshake_info[:client_pk].to_bytes
 
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
+    
     begin
       db.transaction do
-        db.execute(<<~SQL
-          INSERT INTO
+        recipient_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", recipient)
+
+        sender_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?", sender_pk)
+        
+        db.execute(<<~SQL,
+          INSERT INTO messages (recipient_id, sender_id, message) VALUES (?, ?, ?);
+        SQL
+        [recipient_id, sender_id, payload]
+        )
       end
     rescue  
       raise ProtocolError, "Something wrong happened operating the database"

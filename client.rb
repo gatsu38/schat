@@ -41,6 +41,8 @@ MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
 MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
 MSG_CLIENT_E2EE_FIRST_MESSAGE = "\x0b"
 MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
+MSG_CLIENT_E2EE_ASK_MESSAGES = "\x0d"
+MSG_SERVER_E2EE_DELIVER_MESSAGES = "\x0e"
 class ProtocolError < StandardError; end
 
 class SecureClient
@@ -48,10 +50,26 @@ class SecureClient
   include Utils
   include Builders
 
-  def e2ee_send_first_message(handshake_info, nonce_session, secret_root_box)
-    
-  end
 
+  # ask the server if there's messages in the queue and fetch them
+  def e2ee_ask_messages(handshake_info, nonce_session)
+    sock = handshake_info[:sock]
+    server_box = handshake_info[:client_box]
+
+    message = MSG_CLIENT_E2EE_ASK_MESSAGES
+
+    sender(sock, server_box, nonce_session, message)
+
+    # obtain server answer
+    returned_payload = read_blob(sock)
+
+    # decipher server answer
+    plain_text = decipher(returned_payload, server_box)
+
+    e2ee_first_client_to_client
+
+  end
+  
 
   # receive the first message from a different client
   def e2ee_first_client_to_client(message, handshake_info)
@@ -96,8 +114,7 @@ class SecureClient
   def e2ee_root_key(handshake_info, nonce_session)
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
-
-    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+   raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
 
     begin
       db = SQLite3::Database.new(DB_FILE)
@@ -132,7 +149,10 @@ class SecureClient
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
-    ciphertext = secret_root_box.encrypt(nonce, payload)
+
+    message = "my nice message"
+    
+    ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
 
     signature = @host_sk.sign(local_eph_pub_key)
@@ -160,9 +180,8 @@ class SecureClient
       payload_size +
       username +
       payload
-    binding.pry
     sender(sock, server_box, nonce_session, message)
-
+    binding.pry
     # obtain server answer
     returned_payload = read_blob(sock)
 
@@ -170,10 +189,6 @@ class SecureClient
     plain_text = decipher(returned_payload, server_box)
 
     response = handler_caller(plain_text)
-    
-    rescue
-      raise ProtocolError, "Something wrong happened with the shared secrets creation."
-    end
     
   rescue
     db&.close
@@ -531,6 +546,7 @@ include Utils
   puts "3) manually share with the server the keys for e2ee"
   puts "4) obtain the keys for e2ee for a given username"
   puts "5) Starts communication with a given username"
+  puts "6) Fetch messages on the server"
   choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
 
@@ -567,10 +583,19 @@ include Utils
       end
     when 5
       if handshake_info && nonce_session
+      client.e2ee_root_key(handshake_info, nonce_session)
     else
       handshake_info = client.hello_server()
       nonce_session = Session.new("server", handshake_info[:client_nonce])
       client.e2ee_root_key(handshake_info, nonce_session)
+    end
+    when 6
+      if handshake_info && nonce_session
+      client.e2ee_ask_messages(handshake_info, nonce_session)
+    else
+      handshake_info = client.hello_server()
+      nonce_session = Session.new("server", handshake_info[:client_nonce])
+      client.e2ee_ask_messages(handshake_info, nonce_session)        
     end
   else
     raise ArgumentError, "non existing choice"

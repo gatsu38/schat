@@ -115,6 +115,8 @@ MAX_FIELD_SIZE = 1024
       response = e2ee_message_receiver(handled_message, handshake_info)
       when "\x0d"
       response = e2ee_message_harvester(handled_message, handshake_info)
+      when "\x0e" 
+      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
     end

@@ -107,9 +107,8 @@ class SecureServer
         row["sender_username"] +
         row["message"]
     end
-    binding.pry    
-    payload
-    binding.pry
+    message = MSG_SERVER_E2EE_DELIVER_MESSAGES + payload
+    message
   ensure
     db&.close
   end
@@ -146,7 +145,6 @@ class SecureServer
         recipient_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", recipient)
 
         sender_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?", sender_pk)
-        
         db.execute(<<~SQL,
           INSERT INTO messages (recipient_id, sender_id, message) VALUES (?, ?, ?);
         SQL
@@ -156,6 +154,9 @@ class SecureServer
     rescue  
       raise ProtocolError, "Something wrong happened operating the database"
     end
+  digest = RbNaCl::Hash.sha256(message)
+  digest
+  
   rescue
   db&.close  
   end

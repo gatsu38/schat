@@ -41,6 +41,7 @@ MSG_CLIENT_E2EE_KEYS_REQUEST = "\x09"
 MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE = "\x0a"
 MSG_CLIENT_E2EE_FIRST_MESSAGE = "\x0b"
 MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
+MSG_CLI_TO_CLI_FIRST_MESSAGE = "\x0f"
 MSG_CLIENT_E2EE_ASK_MESSAGES = "\x0d"
 MSG_SERVER_E2EE_DELIVER_MESSAGES = "\x0e"
 class ProtocolError < StandardError; end
@@ -50,14 +51,56 @@ class SecureClient
   include Utils
   include Builders
 
+  def e2ee_cli_message_parser(message)
+    flag = read_exact(message, 0, 1)
+    remaining_message = message.byteslice(1..)
+    case flag
+    when "\x0f"
+    e2ee_peer_first_message(remaining_message)
+    when "\x10"
+    e2ee_peer_message(remaining_message)    
+    end
+    
+  end
 
+
+  # reads all the messages sent from the server
+  def e2ee_read_server_messages_blob(handled_payload, handled_client)
+    offset = 0
+    
+    messages_count_header = read_exact(handled_payload, offset, 2)
+    messages_count = messages_count_header.unpack1("n")
+    offset += 2
+    messages_count.times do
+      blob_size_header = read_exact(handled_payload, offset, 4)
+      blob_size = blob_size_header.unpack1("N")
+      offset += 4
+
+      username_size_header = read_exact(handled_payload, offset, 1)
+      username_size = username_size_header.unpack1("C")
+      offset += 1
+
+      message_size_header = read_exact(handled_payload, offset, 4)
+      message_size = message_size_header.unpack1("N")
+      offset += 4
+
+      username = read_exact(handled_payload, offset, username_size)
+      offset += username_size
+      
+      message = read_exact(handled_payload, offset, message_size)
+      offset += message_size
+      
+      e2ee_cli_message_parser(message)    
+    end
+  end
+
+  
   # ask the server if there's messages in the queue and fetch them
   def e2ee_ask_messages(handshake_info, nonce_session)
     sock = handshake_info[:sock]
     server_box = handshake_info[:client_box]
 
     message = MSG_CLIENT_E2EE_ASK_MESSAGES
-
     sender(sock, server_box, nonce_session, message)
 
     # obtain server answer
@@ -65,23 +108,21 @@ class SecureClient
 
     # decipher server answer
     plain_text = decipher(returned_payload, server_box)
-
-    e2ee_first_client_to_client
+    handler_caller(plain_text)
 
   end
   
 
   # receive the first message from a different client
-  def e2ee_first_client_to_client(message, handshake_info)
+  def e2ee_peer_first_message(message)
     offset = 0
-
     remote_id_pub_key = read_exact(message, offset, 32)
     offset += 32
 
     remote_eph_pub_key = read_exact(message, offset, 32)
     offset += 32
 
-    one_time_pub_key = read_exact(message, offset, 32)
+    remote_ot_pub_key = read_exact(message, offset, 32)
     offset += 32
 
     signature_size_header = read_exact(message, offset, 2)
@@ -98,15 +139,41 @@ class SecureClient
 
     unless message.bytesize == ciphertext_size + nonce_size + signature_size + 32 + 32 + 32 + 2 + 2 + 4
       raise ProtocolError, "Declared and received size mismatch"
-    end
-
+    end    
     signature = read_exact(message, offset, signature_size)
     offset += signature_size
+
+    remote_id_pub_key_prepared =RbNaCl::Signatures::Ed25519::VerifyKey.new(remote_id_pub_key)
+    remote_id_pub_key_prepared.verify(signature, remote_eph_pub_key)
 
     nonce = read_exact(message, offset, nonce_size)
     offset += nonce_size
 
     ciphertext = read_exact(message, offset, ciphertext_size)
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    begin
+      keys = db.get_first_row(<<-SQL)
+        SELECT private_signed_prekey AS priv, public_signed_prekey AS pub FROM shared_prekey;
+      SQL
+    rescue
+      raise ProtocolError, "Something went wrong during db interaction"
+    end
+    raise "Missing keys" unless keys
+    local_eph_pub_key = keys["pub"]
+    local_eph_pri_key = keys["priv"]
+
+    identity_secret = dh(remote_id_pub_key, @host_sk.to_bytes)
+    session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
+    one_time_secret = dh(remote_ot_pub_key, local_eph_pri_key)
+
+    combined_secrets = identity_secret + session_secret + one_time_secret
+    root_key = RbNaCl::Hash.sha256(combined_secrets)
+    secret_root_box = RbNaCl::SecretBox.new(root_key)
+    plain_text = secret_root_box.open(nonce, ciphertext)
+  rescue
+    db&.close
   end
 
 
@@ -154,10 +221,10 @@ class SecureClient
     
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
-
     signature = @host_sk.sign(local_eph_pub_key)
     signature_size = [signature.bytesize].pack("n")
     payload =
+      MSG_CLI_TO_CLI_FIRST_MESSAGE +
       @host_pk.to_bytes +
       local_eph_pub_key +
       remote_ot_pub_key +
@@ -181,14 +248,16 @@ class SecureClient
       username +
       payload
     sender(sock, server_box, nonce_session, message)
-    binding.pry
     # obtain server answer
     returned_payload = read_blob(sock)
 
     # decipher server answer
     plain_text = decipher(returned_payload, server_box)
 
-    response = handler_caller(plain_text)
+  message_sliced = message.byteslice(1..)
+  digest = RbNaCl::Hash.sha256(message_sliced)
+
+  puts "message properly uploaded" if plain_text == digest
     
   rescue
     db&.close
@@ -256,7 +325,6 @@ class SecureClient
 
     # decipher server answer
     plain_text = decipher(returned_payload, safe_box)
-
     response = handler_caller(plain_text)
   end
 

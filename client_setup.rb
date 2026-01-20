@@ -4,25 +4,74 @@ require 'rbnacl'
 require 'pry'
 require 'pry-byebug'
 # !!!! FIX PATH
-DB_FILE = File.expand_path('/home/kali/schat_db/client.db')
-CONTACTS_TABLE = 'contacts'
+# DB_FILE = 
 USER_TABLE = 'user'
-KEYS_TABLE = 'ephemeral_keys'
+SESSIONS = 'sessions'
 SERVER_IDENTITY = 'server_identity'
 SHARED_PREKEY = 'shared_prekey'
 ONE_TIME_KEYS = 'one_time_prekeys'
 CLIENTS_INFO = 'clients_info'
-if File.exist?(DB_FILE)
-  puts "Database already exists. Would you like to create a new identity? Y/N"
-  answer = gets.chomp.strip.upcase
-  exit unless answer == 'Y'
-end
+MESSAGES = 'messages'
+#if File.exist?(DB_FILE)
+#  puts "Database already exists. Would you like to create a new identity? Y/N"
+#  answer = gets.chomp.strip.upcase
+#  exit unless answer == 'Y'
+#end
 
 begin
-
 binding.pry
+  db_name = STDIN.gets.strip
 
-  db = SQLite3::Database.new(DB_FILE)
+  db = SQLite3::Database.new("/home/kali/schat_db/#{db_name}.db")
+
+
+  # contains the messages sent by other users
+  db.execute <<-SQL
+    CREATE TABLE IF NOT EXISTS #{MESSAGES} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender_id INTEGER NOT NULL,
+      message BLOB NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+      FOREIGN KEY (sender_id)
+        REFERENCES clients_info(id)
+        ON DELETE CASCADE
+    );
+  SQL
+
+
+  # contains the ratche sessions info
+  db.execute <<-SQL
+    CREATE TABLE IF NOT EXISTS #{SESSIONS} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+      local_id INTEGER NOT NULL,
+      remote_id INTEGER NOT NULL,
+
+      root_key BLOB NOT NULL,
+
+      send_chain_key BLOB NOT NULL,
+      send_index INTEGER NOT NULL DEFAULT 0,
+
+      recv_chain_key BLOB NOT NULL,
+      recv_index INTEGER NOT NULL DEFAULT 0,
+
+      skipped_keys BLOB,
+
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+      UNIQUE(local_id, remote_id),
+
+      FOREIGN KEY (local_id) 
+        REFERENCES clients_info(user) 
+        ON DELETE CASCADE,
+        
+      FOREIGN KEY (remote_id) 
+        REFERENCES clients_info(id) 
+        ON DELETE CASCADE
+    );
+  SQL
 
 
   # create a table for the current user info
@@ -40,8 +89,9 @@ binding.pry
   SQL
 
 
+  # contains other users info
   db.execute <<-SQL
-    CREATE TABLE clients_info (
+    CREATE TABLE #{CLIENTS_INFO} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE CHECK (
         length(username) BETWEEN 1 AND 20 AND
@@ -57,6 +107,7 @@ binding.pry
   SQL
 
 
+  # creates an identity for the server
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{SERVER_IDENTITY} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +119,7 @@ binding.pry
   SQL
 
 
+  # contains the shared prekey(s)
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{SHARED_PREKEY} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +130,7 @@ binding.pry
   SQL
 
 
+  # contains the one time keys used for the first message 
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{ONE_TIME_KEYS} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

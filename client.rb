@@ -26,7 +26,7 @@ require 'sqlite3'
   # def e2ee_keys_share(handshake_info, nonce_session)
 # main method
   # main()
-DB_FILE = "/home/kali/schat_db/client.db"
+DB_FILE = "/home/kali/schat_db/client1"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -51,20 +51,40 @@ class SecureClient
   include Utils
   include Builders
 
-  def e2ee_cli_message_parser(message)
+  def e2ee_cli_message_parser(message, username)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
     flag = read_exact(message, 0, 1)
     remaining_message = message.byteslice(1..)
+      session = db.get_first_value(<<-SQL,
+        SELECT id FROM sessions WHERE remote_id = (
+          SELECT id FROM clients_info WHERE username = ?)
+        SQL
+        username
+      )
     case flag
     when "\x0f"
-    e2ee_peer_first_message(remaining_message)
+      if session == nil
+        e2ee_peer_first_message(remaining_message, username)
+      else
+        raise ProtocolError, "There is already an active session among the users, but the remote asks for a fresh session"
+      end  
     when "\x10"
-    e2ee_peer_message(remaining_message)    
+      if session == nil
+        raise ProtocolError, "There is no active session among the users, but the remot user asks to continue a pre established one"
+      else
+        e2ee_peer_message(remaining_message, username)    
+      end
     end
-    
+  rescue
+    db&.close    
   end
 
 
   # reads all the messages sent from the server
+  # sees how many messages are in the queue, who is the sender 
+  # checks if this is a new or old communication session
   def e2ee_read_server_messages_blob(handled_payload, handled_client)
     offset = 0
     
@@ -90,7 +110,7 @@ class SecureClient
       message = read_exact(handled_payload, offset, message_size)
       offset += message_size
       
-      e2ee_cli_message_parser(message)    
+      e2ee_cli_message_parser(message, username)    
     end
   end
 
@@ -114,7 +134,7 @@ class SecureClient
   
 
   # receive the first message from a different client
-  def e2ee_peer_first_message(message)
+  def e2ee_peer_first_message(message, username)
     offset = 0
     remote_id_pub_key = read_exact(message, offset, 32)
     offset += 32
@@ -137,9 +157,14 @@ class SecureClient
     ciphertext_size = ciphertext_size_header.unpack1("N")
     offset += 4
 
-    unless message.bytesize == ciphertext_size + nonce_size + signature_size + 32 + 32 + 32 + 2 + 2 + 4
+    unless message.bytesize == ciphertext_size + nonce_size + signature_size + 32 + 32 + 32 + 2 + 2 + 4 + 4
       raise ProtocolError, "Declared and received size mismatch"
     end    
+
+    counter = read_exact(message, offset, 4).unpack1("N")
+    raise ProtocolError, "counter size too big" unless counter == 0
+    offset += 4
+    
     signature = read_exact(message, offset, signature_size)
     offset += signature_size
 
@@ -167,11 +192,40 @@ class SecureClient
     identity_secret = dh(remote_id_pub_key, @host_sk.to_bytes)
     session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
     one_time_secret = dh(remote_ot_pub_key, local_eph_pri_key)
-
+    binding.pry
     combined_secrets = identity_secret + session_secret + one_time_secret
     root_key = RbNaCl::Hash.sha256(combined_secrets)
-    secret_root_box = RbNaCl::SecretBox.new(root_key)
+
+    # RECV and SEND are inverted because these are the keys 
+    # seen from the opposite side (receiving end)
+    send_chain_key = RbNaCl::Hash.sha256(root_key + "RECV")
+    recv_chain_key = RbNaCl::Hash.sha256(root_key + "SEND")
+    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+
+    secret_root_box = RbNaCl::SecretBox.new(message_key)
+    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
+    send_counter = counter += 1
+    recv_counter = 0
     plain_text = secret_root_box.open(nonce, ciphertext)
+    begin
+      db.transaction do
+        username_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
+        current_it = db.get_first_value("SELECT id FROM user")
+        db.execute(<<~SQL,
+          INSERT INTO messages (sender_id, message) 
+          VALUES (?, ?)
+        SQL
+        [username_id, plain_text]
+        )
+        db.execute(<<~SQL,
+          INSERT INTO sessions (local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index)
+        SQL
+        [current_id, username_id, root_key, next_send_chain_key, send_counter, next_recv_chain_key, recv_counter]
+        )
+      end
+    rescue
+      raise ProtocolError, "Coulnd't save the user message on the local db"
+    end
   rescue
     db&.close
   end
@@ -182,7 +236,7 @@ class SecureClient
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-
+   
     begin
       db = SQLite3::Database.new(DB_FILE)
       db.results_as_hash = true
@@ -204,25 +258,31 @@ class SecureClient
       identity_secret = dh(remote_id_pub_key, @host_sk.to_bytes)
       session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
       one_time_secret = dh(remote_ot_pub_key, local_eph_pri_key)
-
+      binding.pry
       combined_secrets = identity_secret + session_secret + one_time_secret
       root_key = RbNaCl::Hash.sha256(combined_secrets)
-      secret_root_box = RbNaCl::SecretBox.new(root_key)
+      send_chain_key = RbNaCl::Hash.sha256(root_key + "SEND")
+      recv_chain_key = RbNaCl::Hash.sha256(root_key + "RECV")
+      message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
 
+      secret_root_box = RbNaCl::SecretBox.new(message_key)
+      next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
 
+    send_messages_counter = 0
+    recv_messages_counter = 0
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
-
     message = "my nice message"
     
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
     signature = @host_sk.sign(local_eph_pub_key)
     signature_size = [signature.bytesize].pack("n")
+    counter = [send_messages_counter].pack("N")
     payload =
       MSG_CLI_TO_CLI_FIRST_MESSAGE +
       @host_pk.to_bytes +
@@ -231,10 +291,12 @@ class SecureClient
       signature_size +
       nonce_size +
       ciphertext_size +
+      counter +
       signature +
       nonce +
       ciphertext
-    
+
+    send_messages_counter += 1  
     sock = handshake_info[:sock]
     server_box = handshake_info[:client_box]
 
@@ -247,6 +309,26 @@ class SecureClient
       payload_size +
       username +
       payload
+
+    begin
+      db.transaction do
+      local_id = db.get_first_value("SELECT id FROM user")
+      remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
+
+      db.execute(
+        <<~SQL,
+          INSERT INTO sessions
+          (local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index)  
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        SQL
+        [local_id, remote_id, root_key, next_send_chain_key, send_messages_counter, recv_chain_key, recv_messages_counter]
+      )
+
+      end
+    rescue
+      raise ProtocolError, "Something went wrong during db operations"
+    end
+    
     sender(sock, server_box, nonce_session, message)
     # obtain server answer
     returned_payload = read_blob(sock)

@@ -136,13 +136,6 @@ class SecureClient
   # computes the combined secrets to obtain the root key
   def create_root_key(remote_id_pub_key, remote_eph_pub_key, local_eph_pri_key, remote_ot_pub_key, role, local_ot_pri_key: nil)
 
-    private_key_x25519 = "\x00" * 32
-    public_key_x25519 = "\x00" * 32
-    private_key_ed25519 = RbNaCl::Signatures::Ed25519::SigningKey.new(@host_sk.to_bytes)
-    public_key_ed25519 = RbNaCl::Signatures::Ed25519::VerifyKey.new(remote_id_pub_key)
-    returned = private_key_ed25519.crypto_sign_ed25519_sk_to_curve25519(private_key_x25519, private_key_ed25519.to_bytes)
-    returned = public_key_ed25519. crypto_sign_ed25519_pk_to_curve25519(public_key_x25519, public_key_ed25519.to_bytes)
-  
     identity_secret = dh(public_key_x25519, private_key_x25519)
     session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
     if role == "initializer"

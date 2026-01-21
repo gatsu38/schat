@@ -85,7 +85,9 @@ MAX_FIELD_SIZE = 1024
 
   # helper wrapper to obtain the shared secret from two keys
   def dh(public_key, private_key)
-    box = RbNaCl::Box.new(public_key, private_key)
+    pk_encoded = public_key.force_encoding("BINARY")
+    sk_encoded = public_key.force_encoding("BINARY")
+    box = RbNaCl::Box.new(pk_encoded, sk_encoded)
 
     out = "\x00" * 32
     returned = box.crypto_box_curve25519xsalsa20poly1305_beforenm(out, public_key, private_key)
@@ -135,11 +137,14 @@ MAX_FIELD_SIZE = 1024
     username = read_exact(payload, offset, username_size)
     offset += username_size
 
-    client_pub_key_bytes = read_exact(payload, offset, 32)
-    client_pub_key = RbNaCl::Signatures::Ed25519::VerifyKey.new(client_pub_key_bytes)
+    signing_pub_key_bytes = read_exact(payload, offset, 32)
+    signing_pub_key = RbNaCl::Signatures::Ed25519::VerifyKey.new(signing_pub_key_bytes)
     offset += 32
 
-    eph_pk = read_exact(payload, offset, 32)
+    identity_pub_key_bytes = read_exact(payload, offset, 32)
+    offset += 32
+
+    signed_pk = read_exact(payload, offset, 32)
     offset += 32
 
     signature_size_packed = read_exact(payload, offset, 2)
@@ -148,7 +153,7 @@ MAX_FIELD_SIZE = 1024
     signature = read_exact(payload, offset, signature_size)
     offset += signature_size
 
-    unless client_pub_key.verify(signature, eph_pk)
+    unless signing_pub_key.verify(signature, signed_pk)
       raise ProtocolError, "ephemeral pub key mismatch with signature and client public key"
     end
 
@@ -168,7 +173,7 @@ MAX_FIELD_SIZE = 1024
 
     one_time_keys = read_exact(payload, offset, otp_size)
 
-    e_material = {username: username, pub_key: client_pub_key_bytes, eph_pk: eph_pk, signature: signature, otpk: one_time_keys, otp_amount: otp_amount}
+    e_material = {username: username, signing_pub_key: signing_pub_key_bytes, identity_pub_key: identity_pub_key , signed_pk: signed_pk, signature: signature, otpk: one_time_keys, otp_amount: otp_amount}
 
     e_material
   end

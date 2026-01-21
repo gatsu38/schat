@@ -82,8 +82,10 @@ binding.pry
         length(username) <= 20 AND
         username GLOB '[A-Za-z0-9]*'
       ),
-      private_key BLOB NOT NULL CHECK (length(private_key) = 32),
-      public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+      signing_private_key BLOB NOT NULL CHECK (length(signing_private_key) = 32),
+      signing_public_key BLOB NOT NULL CHECK (length(signing_public_key) = 32),
+      identity_private_key BLOB NOT NULL CHECK (length(identity_private_key) = 32),
+      identity_public_key BLOB NOT NULL (length(identity_public_key) = 32),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP  
     );
   SQL
@@ -160,11 +162,16 @@ def new_identity(db)
     end
   end
 
-  host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
-  host_pk = host_sk.verify_key
+  host_signing_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
+  host_signing_pk = host_sk.verify_key
 
-  db.execute(
-    "INSERT INTO #{USER_TABLE} (username, private_key, public_key) VALUES (?, ?, ?)", [username, host_sk.to_bytes, host_pk.to_bytes]
+  host_identity_sk = RbNaCl::PrivateKey.new
+  host_identity_pk = host_identity_sk.public_key
+  db.execute(<<~SQL,
+    INSERT INTO #{USER_TABLE} (username, signing_private_key, signing_public_key, identity_private_key, identity_public_key) 
+    VALUES (?, ?, ?, ?, ?)
+    SQL
+    [username, host_signing_sk.to_bytes, host_signing_pk.to_bytes, host_identity_sk.to_bytes, host_identity_pk.to_bytes]
   );  
   puts "New identity created successfully"
 end

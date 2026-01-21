@@ -36,8 +36,8 @@ module Builders
   end
 
   
-  # build the payload containing the ephemeral_key, the long term public_key, the one time keys and the signature
-  def e2ee_builder(username, host_pk, eph_key, signature, one_time_keys, keys_number)
+  # build the payload containing the signed_key, the long term signing_public_key, the identity_public_key and the one time keys and the signature
+  def e2ee_builder(username, signing_host_pk, identity_host_pk, signed_key, signature, one_time_keys, keys_number)
     username_size = [username.bytesize].pack("C")
       
     one_time_keys_payload = +""
@@ -53,8 +53,9 @@ module Builders
       payload =
         username_size +
         username +
-        host_pk +
-        eph_key +
+        signing_host_pk +
+        identity_host_pk +
+        signed_key +
         [signature_size].pack("n") +
         signature +
         [keys_number + 1].pack("n") +

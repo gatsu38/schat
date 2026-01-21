@@ -24,7 +24,8 @@ db.execute <<-SQL
         length(username) BETWEEN 1 AND 20 AND
         username NOT GLOB '*[^A-Za-z0-9]*'
       ),
-    public_key BLOB NOT NULL UNIQUE CHECK (length(public_key) = 32),
+    signing_public_key BLOB NOT NULL UNIQUE CHECK (length(signing_public_key) = 32),
+    identity_public_key BLOB UNIQUE CHECK (identity_public_key IS NULL OR length(identity_public_key) = 32),
     signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
     signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_sig IS NULL OR length(signed_prekey_sig) = 64),
     spk_created_at TIMESTAMP,

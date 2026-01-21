@@ -165,7 +165,7 @@ class SecureServer
   # handle the registration of a new user
   def registration_request_handler(message, handshake_info)
     offset = 0
-    client_pk = handshake_info[:client_pk].to_bytes
+    signing_pub_key = handshake_info[:client_pk].to_bytes
 
     nickname_header = read_exact(message, offset, 1)
     nickname_size = nickname_header.unpack1("C")
@@ -199,8 +199,8 @@ class SecureServer
         
         begin
           db.execute(
-          "INSERT INTO clients_info (username, public_key)  VALUES (?, ?)",
-          [nickname, client_pk]
+          "INSERT INTO clients_info (username, signing_public_key)  VALUES (?, ?)",
+          [nickname, signing_public_key]
           )
         rescue SQLite3::ConstraintException
           raise ProtocolError.new("Username already exists", "\x03")
@@ -234,8 +234,9 @@ class SecureServer
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
  
     username = e_material[:username]
-    client_pub_key = e_material[:pub_key]
-    eph_pk = e_material[:eph_pk]
+    signing_pub_key = e_material[:signing_pub_key]
+    identity_pub_key = e_material[:identity_pub_key]
+    signed_pk = e_material[:signed_pk]
     signature = e_material[:signature]
     one_time_keys = e_material[:otpk]
     otp_amount = e_material[:otp_amount]
@@ -244,15 +245,18 @@ class SecureServer
     db.results_as_hash = true
 
     begin
-      client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?",
-        [client_pub_key]
+      client_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?",
+        [signing_pub_key]
       )
       db.transaction do
-        db.execute("UPDATE clients_info SET signed_prekey_pub = ? WHERE id =?",
-          [eph_pk,  client_id]
-        )
-        db.execute("UPDATE clients_info SET signed_prekey_sig = ? WHERE id =?",
-          [signature,  client_id]
+
+        db.execute(<<~SQL,
+          UPDATE clients_info
+          SET signed_prekey_pub = ?
+          SET signed_prekey_sig = ?
+          SET identity_public_key = ?
+        SQL
+        [signed_pk, signature, identity_pub_key, client_id]
         )
         counter = 0
         offset_2 = 0

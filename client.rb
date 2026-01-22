@@ -11,7 +11,7 @@ require 'sqlite3'
 
 # LIST OF FUNCTIONS
 # the first method called to send a message to another client: computes the shared secret root key
-  # e2ee_root_key
+  # e2ee_first_message
 # called during hello_client to check if the public key matches the registered server
   # server_fingerprint_check(remote_pk)
 # ask the user to provide the server fingerprint, use it later to check the server identity
@@ -27,7 +27,7 @@ require 'sqlite3'
 # main method
   # main()
 
-DB_FILE = "/home/kali/schat_db/client2"
+DB_FILE = "/home/kali/schat_db/client1.db"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -93,10 +93,6 @@ class SecureClient
     messages_count = messages_count_header.unpack1("n")
     offset += 2
     messages_count.times do
-      blob_size_header = read_exact(handled_payload, offset, 4)
-      blob_size = blob_size_header.unpack1("N")
-      offset += 4
-
       username_size_header = read_exact(handled_payload, offset, 1)
       username_size = username_size_header.unpack1("C")
       offset += 1
@@ -133,22 +129,6 @@ class SecureClient
   end
 
 
-  # computes the combined secrets to obtain the root key
-  def create_root_key(remote_id_pub_key, remote_eph_pub_key, local_eph_pri_key, remote_ot_pub_key, role, local_ot_pri_key: nil)
-
-    identity_secret = dh(public_key_x25519, private_key_x25519)
-    session_secret = dh(remote_eph_pub_key, local_eph_pri_key)
-    if role == "initializer"
-      one_time_secret = dh(remote_ot_pub_key, local_eph_pri_key)
-    else
-      one_time_secret = dh(remote_eph_pub_key, local_ot_pri_key)
-    end
-    combined_secrets = identity_secret + session_secret + one_time_secret
-    root_key = RbNaCl::Hash.sha256(combined_secrets)
-    root_key
-  end
-  
-
   # receive the first message from a different client
   def e2ee_peer_first_message(message, username)
     offset = 0
@@ -158,10 +138,13 @@ class SecureClient
     remote_signing_pub_key = read_exact(message, offset, 32)
     offset += 32
 
-    remote_signed_pub_key = read_exact(message, offset, 32)
+    remote_eph_pub_key = read_exact(message, offset, 32)
     offset += 32
 
     local_ot_pub_key_used = read_exact(message, offset, 32)
+    offset += 32
+
+    local_signed_pub_key_used = read_exact(message, offset, 32)
     offset += 32
 
     signature_size_header = read_exact(message, offset, 2)
@@ -176,7 +159,7 @@ class SecureClient
     ciphertext_size = ciphertext_size_header.unpack1("N")
     offset += 4
 
-    unless message.bytesize == ciphertext_size + nonce_size + signature_size + 32 + 32 + 32 + 2 + 2 + 4 + 4
+    unless message.bytesize == ciphertext_size + nonce_size + signature_size + (32 * 5) + 2 + 2 + 4 + 4
       raise ProtocolError, "Declared and received size mismatch"
     end    
 
@@ -187,11 +170,13 @@ class SecureClient
     signature = read_exact(message, offset, signature_size)
     offset += signature_size
 
-    remote_id_pub_key_prepared =RbNaCl::Signatures::Ed25519::VerifyKey.new(remote_id_pub_key)
+    remote_signing_pub_key_prepared = RbNaCl::Signatures::Ed25519::VerifyKey.new(remote_signing_pub_key)
+    transcript = remote_id_pub_key + remote_eph_pub_key
     
-    unless remote_id_pub_key_prepared.verify(signature, remote_signed_pub_key)
+    unless remote_signing_pub_key_prepared.verify(signature, transcript)
       raise ProtocolError, "remote signed key is not verified"
     end
+    
     nonce = read_exact(message, offset, nonce_size)
     offset += nonce_size
 
@@ -200,43 +185,65 @@ class SecureClient
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
     begin
-      keys = db.get_first_row(<<-SQL)
-        SELECT private_signed_prekey AS priv, public_signed_prekey AS pub FROM shared_prekey;
+      keys = db.get_first_row(<<-SQL,
+        SELECT pre.private_signed_prekey AS signed, user.identity_private_key AS id, otp.one_time_private_key AS ot
+        FROM shared_prekey pre
+        JOIN user 
+        JOIN one_time_prekeys otp
+        WHERE pre.public_signed_prekey = ?
+        AND otp.one_time_public_key = ?
       SQL
+      [local_signed_pub_key_used, local_ot_pub_key_used]
+      )
     rescue
       raise ProtocolError, "Something went wrong during db interaction"
     end
     raise "Missing keys" unless keys
-    local_signed_pub_key = keys["pub"]
-    local_signed_pri_key = keys["priv"]
+    local_signed_pri_key = keys["signed"]
+    local_id_pri_key = keys["id"]
+    local_ot_pri_key = keys["ot"]
 
-    root_key = create_root_key(remote_id_pub_key, remote_signed_pub_key, local_signed_pri_key, remote_ot_pub_key)
+    dh1 = dh(local_signed_pri_key, remote_id_pub_key)
+    dh2 = dh(local_id_pri_key, remote_eph_pub_key)
+    dh3 = dh(local_signed_pri_key, remote_eph_pub_key)
+    dh4 = dh(local_ot_pri_key, remote_eph_pub_key)
 
-    # RECV and SEND are inverted because these are the keys 
-    # seen from the opposite side (receiving end)
-    send_chain_key = RbNaCl::Hash.sha256(root_key + "RECV")
-    recv_chain_key = RbNaCl::Hash.sha256(root_key + "SEND")
-    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+    combined_secrets = dh1+dh2+dh3+dh4
+    root_key = RbNaCl::Hash.sha256(combined_secrets)
+    root_key
+
+    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+    a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
+    message_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "MESSAGE")
 
     secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
-    send_counter = counter += 1
-    recv_counter = 0
+    next_a_to_b_chain_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "CHAIN")
+    a_to_b_counter = counter += 1
+    b_to_a_counter = 0
     plain_text = secret_root_box.open(nonce, ciphertext)
     begin
       db.transaction do
-        username_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
-        current_it = db.get_first_value("SELECT id FROM user")
+        
+        current_id = db.get_first_value("SELECT id FROM user")
+        username_id = db.execute(<<~SQL,
+          INSERT INTO clients_info (username, signing_public_key, identity_public_key, signed_prekey_sig)
+          VALUES (?, ?, ?, ?)
+          RETURNING id
+        SQL
+        [username.force_encoding("UTF-8"), remote_signing_pub_key, remote_id_pub_key, signature]
+        )
+        
         db.execute(<<~SQL,
           INSERT INTO messages (sender_id, message) 
           VALUES (?, ?)
         SQL
-        [username_id, plain_text]
+        [username_id[0]["id"], plain_text]
         )
         db.execute(<<~SQL,
-          INSERT INTO sessions (local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index)
+          INSERT INTO sessions (local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_index, b_to_a_chain_key, b_to_a_index)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
         SQL
-        [current_id, username_id, root_key, next_send_chain_key, send_counter, next_recv_chain_key, recv_counter]
+        [current_id, username_id[0]["id"], root_key, a_to_b_chain_key, a_to_b_counter, b_to_a_chain_key, b_to_a_counter]
         )
       end
     rescue
@@ -246,45 +253,56 @@ class SecureClient
     db&.close
   end
 
-
   # the first method called to send a message to another client: derives the root key
-  def e2ee_root_key(handshake_info, nonce_session)
+  def e2ee_first_message(handshake_info, nonce_session)
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-   
+
+    ephemeral_sk = RbNaCl::PrivateKey.generate
+    ephemeral_pk = ephemeral_sk.public_key
+
+    ephemeral_sk_bytes = ephemeral_sk.to_bytes
+    ephemeral_pk_bytes = ephemeral_pk.to_bytes
+       
     begin
       db = SQLite3::Database.new(DB_FILE)
       db.results_as_hash = true
 
       client_info = db.get_first_row("SELECT * FROM clients_info WHERE username = ?", [username])      
       raise "No username found with name #{username}" unless client_info
-      remote_id_pub_key = client_info["public_key"]
+      remote_signing_pub_key = client_info["signing_public_key"]
+      remote_id_pub_key = client_info["identity_public_key"]
       remote_signed_pub_key = client_info["signed_prekey_pub"]
       remote_ot_pub_key = client_info["one_time_key"]
-
-      keys = db.get_first_row(<<-SQL)
-        SELECT private_signed_prekey AS priv, public_signed_prekey AS pub FROM shared_prekey;
-      SQL
+      keys = db.get_first_row("SELECT identity_private_key AS priv, identity_public_key AS pub FROM user")
 
       raise "Missing keys" unless keys
-      local_signed_pub_key = keys["pub"]
-      local_signed_pri_key = keys["priv"]
 
-      root_key = create_root_key(remote_id_pub_key, remote_signed_pub_key, local_signed_pri_key, remote_ot_pub_key)
+      local_identity_pub_key = keys["pub"]
+      local_identity_pri_key = keys["priv"]
 
-      send_chain_key = RbNaCl::Hash.sha256(root_key + "SEND")
-      recv_chain_key = RbNaCl::Hash.sha256(root_key + "RECV")
-      message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
+      dh1 = dh(local_identity_pri_key, remote_signed_pub_key)
+      dh2 = dh(ephemeral_sk_bytes, remote_id_pub_key)
+      dh3 = dh(ephemeral_sk_bytes, remote_signed_pub_key)
+      dh4 = dh(ephemeral_sk_bytes, remote_ot_pub_key)
+
+      combined_secrets = dh1+dh2+dh3+dh4
+      root_key = RbNaCl::Hash.sha256(combined_secrets)
+      root_key
+
+      a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
+      b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+      message_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "MESSAGE")
 
       secret_root_box = RbNaCl::SecretBox.new(message_key)
-      next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
+      next_a_to_b_chain_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "CHAIN")
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
 
-    send_messages_counter = 0
-    recv_messages_counter = 0
+    a_to_b_messages_counter = 0
+    b_to_a_messages_counter = 0
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
@@ -292,14 +310,19 @@ class SecureClient
     
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
-    signature = @host_sk.sign(local_signed_pub_key)
+
+    transcript = local_identity_pub_key + ephemeral_pk_bytes
+    
+    signature = @host_sk.sign(transcript)
     signature_size = [signature.bytesize].pack("n")
-    counter = [send_messages_counter].pack("N")
+    counter = [a_to_b_messages_counter].pack("N")
     payload =
       MSG_CLI_TO_CLI_FIRST_MESSAGE +
+      local_identity_pub_key +
       @host_pk.to_bytes +
-      local_signed_pub_key +
+      ephemeral_pk_bytes +
       remote_ot_pub_key +
+      remote_signed_pub_key +
       signature_size +
       nonce_size +
       ciphertext_size +
@@ -308,7 +331,7 @@ class SecureClient
       nonce +
       ciphertext
 
-    send_messages_counter += 1  
+    a_to_b_messages_counter += 1  
     sock = handshake_info[:sock]
     server_box = handshake_info[:client_box]
 
@@ -322,25 +345,6 @@ class SecureClient
       username +
       payload
 
-    begin
-      db.transaction do
-      local_id = db.get_first_value("SELECT id FROM user")
-      remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
-
-      db.execute(
-        <<~SQL,
-          INSERT INTO sessions
-          (local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index)  
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        SQL
-        [local_id, remote_id, root_key, next_send_chain_key, send_messages_counter, recv_chain_key, recv_messages_counter]
-      )
-
-      end
-    rescue
-      raise ProtocolError, "Something went wrong during db operations"
-    end
-    
     sender(sock, server_box, nonce_session, message)
     # obtain server answer
     returned_payload = read_blob(sock)
@@ -348,11 +352,30 @@ class SecureClient
     # decipher server answer
     plain_text = decipher(returned_payload, server_box)
 
-  message_sliced = message.byteslice(1..)
-  digest = RbNaCl::Hash.sha256(message_sliced)
-
-  puts "message properly uploaded" if plain_text == digest
+    message_sliced = message.byteslice(1..)
+    digest = RbNaCl::Hash.sha256(message_sliced)
+    if plain_text == digest
+    puts "Message properly uploaded"
     
+      begin
+        db.transaction do
+        local_id = db.get_first_value("SELECT id FROM user")
+        remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
+  
+        db.execute(
+          <<~SQL,
+            INSERT INTO sessions
+            (local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_index, b_to_a_chain_key, b_to_a_index)  
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          SQL
+          [local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_messages_counter, b_to_a_chain_key, b_to_a_messages_counter]
+        )
+
+        end
+      rescue
+        raise ProtocolError, "Something went wrong during db operations"
+      end
+    end
   rescue
     db&.close
   end
@@ -363,7 +386,8 @@ class SecureClient
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
 
     username = e_material[:username].force_encoding("UTF-8")
-    client_pub_key = e_material[:pub_key]
+    signing_pub_key = e_material[:signing_pub_key]
+    identity_pub_key = e_material[:identity_pub_key]
     signed_pk = e_material[:signed_pk]
     signature = e_material[:signature]
     one_time_keys = e_material[:otpk]
@@ -381,16 +405,15 @@ class SecureClient
       db.transaction do
       db.execute(
           <<~SQL,
-            INSERT INTO clients_info (username, public_key, signed_prekey_pub, signed_prekey_sig, one_time_key) 
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO clients_info (username, signing_public_key, identity_public_key, signed_prekey_pub, signed_prekey_sig, one_time_key) 
+            VALUES (?, ?, ?, ?, ?, ?)
           SQL
-          [username, client_pub_key, signed_pk, signature, otp]
+          [username, signing_pub_key, identity_pub_key, signed_pk, signature, otp]
         )
       end
     rescue SQLite3::ConstraintException
       raise ProtocolError, "client already registered"
     end
-  
   ensure
   db&.close
   end
@@ -434,10 +457,19 @@ class SecureClient
     signed_sk_bytes = signed_sk.to_bytes
     signed_pk_bytes = signed_pk.to_bytes
 
-    signed_prekey_sig = @host_sk.sign(signed_pk_bytes)
-    db.execute("INSERT INTO shared_prekey (private_signed_prekey, public_signed_prekey) VALUES (?, ?)",
+    begin
+      host_id_pub_key = db.get_first_value("SELECT identity_public_key FROM user")
+      db.execute("INSERT INTO shared_prekey (private_signed_prekey, public_signed_prekey) VALUES (?, ?)",
       [signed_sk_bytes, signed_pk_bytes]
-    )
+      )
+
+    rescue
+      raise ArgumentError, "Local public_id_key not found"
+    end
+
+    transcript = host_id_pub_key + signed_pk_bytes
+
+    signed_prekeys_sig = @host_sk.sign(transcript)
 
     one_time_prekeys = []
 
@@ -471,7 +503,7 @@ class SecureClient
     rescue
       raise ArgumentError, "Local public_id_key not found"
     end
-    payload = e2ee_builder(username, @host_pk.to_bytes, host_id_pub_key, signed_pk_bytes, signed_prekey_sig,  one_time_prekeys, 49)
+    payload = e2ee_builder(username, @host_pk.to_bytes, host_id_pub_key, signed_pk_bytes, signed_prekeys_sig,  one_time_prekeys, 49)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
@@ -687,13 +719,13 @@ class SecureClient
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    host_row = db.get_first_row("SELECT private_key, public_key FROM user")
+    host_row = db.get_first_row("SELECT signing_private_key, signing_public_key FROM user")
 
     raise ProtocolError, "No host key found" unless host_row
 
-    # Long-term host key (Ed25519)
-    host_sk_bytes = host_row["private_key"]
-    host_pk_bytes = host_row["public_key"]
+    # Long-term host signing key (Ed25519)
+    host_sk_bytes = host_row["signing_private_key"]
+    host_pk_bytes = host_row["signing_public_key"]
 
     @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
     @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
@@ -750,11 +782,11 @@ include Utils
       end
     when 5
       if handshake_info && nonce_session
-      client.e2ee_root_key(handshake_info, nonce_session)
+      client.e2ee_first_message(handshake_info, nonce_session)
     else
       handshake_info = client.hello_server()
       nonce_session = Session.new("server", handshake_info[:client_nonce])
-      client.e2ee_root_key(handshake_info, nonce_session)
+      client.e2ee_first_message(handshake_info, nonce_session)
     end
     when 6
       if handshake_info && nonce_session

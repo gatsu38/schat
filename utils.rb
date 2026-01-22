@@ -84,7 +84,7 @@ MAX_FIELD_SIZE = 1024
   end
 
   # helper wrapper to obtain the shared secret from two keys
-  def dh(public_key, private_key)
+  def dh(private_key, public_key)
     pk_encoded = public_key.force_encoding("BINARY")
     sk_encoded = public_key.force_encoding("BINARY")
     box = RbNaCl::Box.new(pk_encoded, sk_encoded)
@@ -152,9 +152,10 @@ MAX_FIELD_SIZE = 1024
     offset += 2
     signature = read_exact(payload, offset, signature_size)
     offset += signature_size
-
-    unless signing_pub_key.verify(signature, signed_pk)
-      raise ProtocolError, "ephemeral pub key mismatch with signature and client public key"
+    
+    transcript = identity_pub_key_bytes + signed_pk
+    unless signing_pub_key.verify(signature, transcript)
+      raise ProtocolError, "Culdn't verify identity and signed prekey"
     end
 
     otp_amount_packed = read_exact(payload, offset, 2)
@@ -167,13 +168,12 @@ MAX_FIELD_SIZE = 1024
 
     raise ProtocolError, "Wrong otp size" unless otp_size == otp_amount * (32 + 1)
 
-    unless payload.bytesize == 1 + username_size + 32 + 32 + 2 + signature_size + 2 + 4 + otp_size
+    unless payload.bytesize == 1 + username_size + 32 + 32 + 32 + 2 + signature_size + 2 + 4 + otp_size
       raise ProtocolError, "received wrong size for e2ee hello"
     end
 
     one_time_keys = read_exact(payload, offset, otp_size)
-
-    e_material = {username: username, signing_pub_key: signing_pub_key_bytes, identity_pub_key: identity_pub_key , signed_pk: signed_pk, signature: signature, otpk: one_time_keys, otp_amount: otp_amount}
+    e_material = {username: username, signing_pub_key: signing_pub_key_bytes, identity_pub_key: identity_pub_key_bytes , signed_pk: signed_pk, signature: signature, otpk: one_time_keys, otp_amount: otp_amount}
 
     e_material
   end

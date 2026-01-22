@@ -74,11 +74,11 @@ class SecureServer
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
-    client_pk = handshake_info[:client_pk].to_bytes
+    client_signing_pk = handshake_info[:client_pk].to_bytes
     rows = nil
     begin
       db.transaction do
-        client_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?", client_pk)
+        client_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?", client_signing_pk)
         
         rows = db.execute(<<~SQL, client_id)
           SELECT m.message, c.username AS sender_username
@@ -91,17 +91,13 @@ class SecureServer
     rescue
       raise ProtocolError, "Something wrong happened during db work"
     end
-
     rows_count = [rows.length].pack("n")
     payload =""
     payload << rows_count
     rows.each do |row|
       username_size = [row["sender_username"].bytesize].pack("C")
       message_size = [row["message"].bytesize].pack("N")
-      blob_size_header = row["message"].bytesize + row["sender_username"].bytesize 
-      blob_size = [blob_size_header].pack("N")
       payload <<
-        blob_size +
         username_size +
         message_size +
         row["sender_username"] +
@@ -135,16 +131,15 @@ class SecureServer
 
     payload = read_exact(message, offset, payload_size)
 
-    sender_pk = handshake_info[:client_pk].to_bytes
+    sender_signing_pk = handshake_info[:client_pk].to_bytes
 
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-    
     begin
       db.transaction do
         recipient_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", recipient)
 
-        sender_id = db.get_first_value("SELECT id FROM clients_info WHERE public_key = ?", sender_pk)
+        sender_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?", sender_signing_pk)
         db.execute(<<~SQL,
           INSERT INTO messages (recipient_id, sender_id, message) VALUES (?, ?, ?);
         SQL
@@ -200,7 +195,7 @@ class SecureServer
         begin
           db.execute(
           "INSERT INTO clients_info (username, signing_public_key)  VALUES (?, ?)",
-          [nickname, signing_public_key]
+          [nickname, signing_pub_key]
           )
         rescue SQLite3::ConstraintException
           raise ProtocolError.new("Username already exists", "\x03")
@@ -243,18 +238,17 @@ class SecureServer
     
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-
     begin
       client_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?",
         [signing_pub_key]
       )
       db.transaction do
-
         db.execute(<<~SQL,
           UPDATE clients_info
-          SET signed_prekey_pub = ?
-          SET signed_prekey_sig = ?
-          SET identity_public_key = ?
+          SET signed_prekey_pub = ?,
+              signed_prekey_sig = ?,
+              identity_public_key = ?
+          WHERE id = ?
         SQL
         [signed_pk, signature, identity_pub_key, client_id]
         )
@@ -304,7 +298,8 @@ class SecureServer
     )
     id = username_row["id"]
     username = username_row["username"]
-    public_key = username_row["public_key"]
+    signing_public_key = username_row["signing_public_key"]
+    identity_public_key = username_row["identity_public_key"]
     signed_prekey_pub = username_row["signed_prekey_pub"]
     signed_prekey_sig = username_row["signed_prekey_sig"]
 
@@ -332,7 +327,7 @@ class SecureServer
     one_time_key = one_time_key.transform_keys(&:to_sym)
     one_time_prekey << {pk: one_time_key[:opk_pub], counter: one_time_key[:counter]}
 
-    payload = e2ee_builder(username, public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
+    payload = e2ee_builder(username, signing_public_key, identity_public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]

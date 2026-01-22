@@ -19,7 +19,7 @@ MESSAGES = 'messages'
 #end
 
 begin
-binding.pry
+  puts "Insert db name"
   db_name = STDIN.gets.strip
 
   db = SQLite3::Database.new("/home/kali/schat_db/#{db_name}.db")
@@ -50,11 +50,11 @@ binding.pry
 
       root_key BLOB NOT NULL,
 
-      send_chain_key BLOB NOT NULL,
-      send_index INTEGER NOT NULL DEFAULT 0,
+      a_to_b_chain_key BLOB NOT NULL,
+      a_to_b_index INTEGER NOT NULL DEFAULT 0,
 
-      recv_chain_key BLOB NOT NULL,
-      recv_index INTEGER NOT NULL DEFAULT 0,
+      b_to_a_chain_key BLOB NOT NULL,
+      b_to_a_index INTEGER NOT NULL DEFAULT 0,
 
       skipped_keys BLOB,
 
@@ -85,11 +85,12 @@ binding.pry
       signing_private_key BLOB NOT NULL CHECK (length(signing_private_key) = 32),
       signing_public_key BLOB NOT NULL CHECK (length(signing_public_key) = 32),
       identity_private_key BLOB NOT NULL CHECK (length(identity_private_key) = 32),
-      identity_public_key BLOB NOT NULL (length(identity_public_key) = 32),
+      identity_public_key BLOB NOT NULL CHECK (length(identity_public_key) = 32),
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP  
     );
   SQL
 
+binding.pry
 
   # contains other users info
   db.execute <<-SQL
@@ -99,7 +100,9 @@ binding.pry
         length(username) BETWEEN 1 AND 20 AND
         username NOT GLOB '*[^A-Za-z0-9]*'
       ),
-      public_key BLOB NOT NULL UNIQUE CHECK (length(public_key) = 32),
+      signing_public_key BLOB NOT NULL UNIQUE CHECK (length(signing_public_key) = 32),
+      identity_public_key BLOB UNIQUE CHECK (identity_public_key IS NULL OR length(identity_public_key) = 32),
+      ephemeral_public_key BLOB UNIQUE CHECK (ephemeral_public_key IS NULL OR length(ephemeral_public_key) = 32),
       signed_prekey_pub BLOB UNIQUE CHECK (signed_prekey_pub IS NULL OR length(signed_prekey_pub) = 32),
       signed_prekey_sig BLOB UNIQUE CHECK (signed_prekey_sig IS NULL OR length(signed_prekey_sig) = 64),
       one_time_key BLOB UNIQUE CHECK (one_time_key IS NULL OR length(one_time_key) = 32),
@@ -163,9 +166,9 @@ def new_identity(db)
   end
 
   host_signing_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
-  host_signing_pk = host_sk.verify_key
+  host_signing_pk = host_signing_sk.verify_key
 
-  host_identity_sk = RbNaCl::PrivateKey.new
+  host_identity_sk = RbNaCl::PrivateKey.generate
   host_identity_pk = host_identity_sk.public_key
   db.execute(<<~SQL,
     INSERT INTO #{USER_TABLE} (username, signing_private_key, signing_public_key, identity_private_key, identity_public_key) 

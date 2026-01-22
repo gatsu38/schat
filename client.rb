@@ -259,6 +259,20 @@ class SecureClient
     username = STDIN.gets.strip
    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
 
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    existing_session_id = db.get_first_value(<<~SQL,
+      SELECT id FROM sessions WHERE (SELECT id FROM clients_info WHERE username = ?)
+    SQL
+    username.force_encoding("UTF-8")
+    )
+
+    if existing_session_id
+      puts "A session with this user already exists exiting"
+      return 0
+    end
+
     ephemeral_sk = RbNaCl::PrivateKey.generate
     ephemeral_pk = ephemeral_sk.public_key
 
@@ -266,8 +280,6 @@ class SecureClient
     ephemeral_pk_bytes = ephemeral_pk.to_bytes
        
     begin
-      db = SQLite3::Database.new(DB_FILE)
-      db.results_as_hash = true
 
       client_info = db.get_first_row("SELECT * FROM clients_info WHERE username = ?", [username])      
       raise "No username found with name #{username}" unless client_info

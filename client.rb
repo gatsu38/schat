@@ -52,6 +52,48 @@ class SecureClient
   include Utils
   include Builders
 
+  def show_chat(username)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    messages = db.execute(<<~SQL,
+      SELECT * FROM messages
+      WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
+      ORDER by id ASC
+      SQL
+      username
+      )
+
+    puts "#{username}:"
+    messages.each do |msg|
+      puts msg["message"]
+      puts "-" * 40      
+    end
+  rescue
+    db&.close
+  end
+
+  # continue a previously started chat
+  def e2ee_continue_chat(username, handshake_info, nonce_session)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    show_chat(username)  
+
+    session_id = db.get_first_row(<<~SQL,
+      SELECT id FROM sessions
+      WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
+      ORDER by id ASC
+      SQL
+      username
+      )
+
+  rescue
+    db&.close
+  end
+
+
+  # parses a header flag, so far tells if there is already an e2ee session among the peers
+  # tells the peer that there actually already is such a session
   def e2ee_client_message_parser(message, username)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
@@ -186,7 +228,7 @@ class SecureClient
     db.results_as_hash = true
     begin
       keys = db.get_first_row(<<-SQL,
-        SELECT pre.private_signed_prekey AS signed, user.identity_private_key AS id, otp.one_time_private_key AS ot
+        SELECT pre.private_signed_prekey AS signed, user.identity_public_key AS id_pub , user.identity_private_key AS id_pri, otp.one_time_private_key AS ot
         FROM shared_prekey pre
         JOIN user 
         JOIN one_time_prekeys otp
@@ -200,7 +242,8 @@ class SecureClient
     end
     raise "Missing keys" unless keys
     local_signed_pri_key = keys["signed"]
-    local_id_pri_key = keys["id"]
+    local_id_pri_key = keys["id_pri"]
+    local_id_pub_key = keys["id_pub"]
     local_ot_pri_key = keys["ot"]
 
     dh1 = dh(local_signed_pri_key, remote_id_pub_key)
@@ -210,21 +253,49 @@ class SecureClient
 
     combined_secrets = dh1+dh2+dh3+dh4
     root_key = RbNaCl::Hash.sha256(combined_secrets)
-    root_key
 
-    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+
     a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
-    message_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "MESSAGE")
+    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+
+    session = {
+      a_to_b_chain_key: a_to_b_chain_key,
+      a_to_b_index: 0,
+      b_to_a_chain_key: b_to_a_chain_key,
+      b_to_a_index: 0
+    }
+
+    if local_id_pub_key < remote_id_pub_key      
+      send_dir = :a_to_b
+      recv_dir = :b_to_a
+    else
+      send_dir = :b_to_a
+      recv_dir = :a_to_b
+    end
+
+    def chain_key_for(session, direction)
+      session[:"#{direction}_chain_key"]
+    end
+
+    def index_for(session, direction)
+      session[:"#{direction}_index"]
+    end
+    send_chain_key = chain_key_for(session, send_dir)
+    recv_chain_key = chain_key_for(session, recv_dir)
+    send_index = index_for(session, send_dir)
+    recv_index = index_for(session, recv_dir)
+
+    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
 
     secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_a_to_b_chain_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "CHAIN")
-    a_to_b_counter = counter += 1
-    b_to_a_counter = 0
+    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
+
+    recv_index += 1
+    send_index = 0
     plain_text = secret_root_box.open(nonce, ciphertext)
     begin
       db.transaction do
-        
-        current_id = db.get_first_value("SELECT id FROM user")
+        local_id = db.get_first_value("SELECT id FROM user")
         username_id = db.execute(<<~SQL,
           INSERT INTO clients_info (username, signing_public_key, identity_public_key, signed_prekey_sig)
           VALUES (?, ?, ?, ?)
@@ -232,19 +303,26 @@ class SecureClient
         SQL
         [username.force_encoding("UTF-8"), remote_signing_pub_key, remote_id_pub_key, signature]
         )
-        
         db.execute(<<~SQL,
           INSERT INTO messages (sender_id, message) 
           VALUES (?, ?)
         SQL
-        [username_id[0]["id"], plain_text]
+        [username_id[0]["id"], plain_text]        
         )
-        db.execute(<<~SQL,
-          INSERT INTO sessions (local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_index, b_to_a_chain_key, b_to_a_index)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        SQL
-        [current_id, username_id[0]["id"], root_key, a_to_b_chain_key, a_to_b_counter, b_to_a_chain_key, b_to_a_counter]
+
+        s_key   = "#{send_dir}_chain_key"
+        s_index = "#{send_dir}_index"
+        r_key   = "#{recv_dir}_chain_key"
+        r_index = "#{recv_dir}_index"
+        db.execute(
+          <<~SQL,
+            INSERT INTO sessions
+            (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          SQL
+          [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, recv_chain_key, recv_index]
         )
+
       end
     rescue
       raise ProtocolError, "Coulnd't save the user message on the local db"
@@ -252,6 +330,7 @@ class SecureClient
   rescue
     db&.close
   end
+
 
   # the first method called to send a message to another client: derives the root key
   def e2ee_first_message(handshake_info, nonce_session)
@@ -270,6 +349,7 @@ class SecureClient
 
     if existing_session_id
       puts "A session with this user already exists exiting"
+      e2ee_continue_chat(username, handshake_info, nonce_session)
       return 0
     end
 
@@ -301,20 +381,48 @@ class SecureClient
 
       combined_secrets = dh1+dh2+dh3+dh4
       root_key = RbNaCl::Hash.sha256(combined_secrets)
-      root_key
 
       a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
       b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
-      message_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "MESSAGE")
+
+      session = {
+        a_to_b_chain_key: a_to_b_chain_key,
+        a_to_b_index: 0,
+        b_to_a_chain_key: b_to_a_chain_key,
+        b_to_a_index: 0
+      }
+
+      if local_identity_pub_key < remote_id_pub_key
+        send_dir = :a_to_b
+        recv_dir = :b_to_a
+      else
+        send_dir = :b_to_a
+        recv_dir = :a_to_b
+      end
+
+      def chain_key_for(session, direction)
+        session[:"#{direction}_chain_key"]
+      end
+  
+      def index_for(session, direction)
+        session[:"#{direction}_index"]
+      end
+
+      a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
+      b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+
+      send_chain_key = chain_key_for(session, send_dir)
+      recv_chain_key = chain_key_for(session, recv_dir)
+      send_index = index_for(session, send_dir)
+      recv_index = index_for(session, recv_dir)
+
+      message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
 
       secret_root_box = RbNaCl::SecretBox.new(message_key)
-      next_a_to_b_chain_key = RbNaCl::Hash.sha256(a_to_b_chain_key + "CHAIN")
+      next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
-
-    a_to_b_messages_counter = 0
-    b_to_a_messages_counter = 0
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
@@ -327,7 +435,7 @@ class SecureClient
     
     signature = @host_sk.sign(transcript)
     signature_size = [signature.bytesize].pack("n")
-    counter = [a_to_b_messages_counter].pack("N")
+    counter = [send_index].pack("N")
     payload =
       MSG_CLI_TO_CLI_FIRST_MESSAGE +
       local_identity_pub_key +
@@ -343,7 +451,7 @@ class SecureClient
       nonce +
       ciphertext
 
-    a_to_b_messages_counter += 1  
+    send_index += 1  
     sock = handshake_info[:sock]
     server_box = handshake_info[:client_box]
 
@@ -366,6 +474,7 @@ class SecureClient
 
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
+
     if plain_text == digest
     puts "Message properly uploaded"
     
@@ -373,14 +482,17 @@ class SecureClient
         db.transaction do
         local_id = db.get_first_value("SELECT id FROM user")
         remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
-  
+        s_key   = "#{send_dir}_chain_key"
+        s_index = "#{send_dir}_index"
+        r_key   = "#{recv_dir}_chain_key"
+        r_index = "#{recv_dir}_index"
         db.execute(
           <<~SQL,
             INSERT INTO sessions
-            (local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_index, b_to_a_chain_key, b_to_a_index)  
+            (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})  
             VALUES (?, ?, ?, ?, ?, ?, ?)
           SQL
-          [local_id, remote_id, root_key, a_to_b_chain_key, a_to_b_messages_counter, b_to_a_chain_key, b_to_a_messages_counter]
+          [local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index]
         )
 
         end
@@ -535,8 +647,6 @@ class SecureClient
   rescue
     db&.close
   end
-
-
 
 
   # handles the returned value from the server at the end of the user registration
@@ -750,6 +860,11 @@ end
 
 def main
 include Utils
+
+  db = SQLite3::Database.new(DB_FILE)
+  db.results_as_hash = true
+
+
   puts "Schat. SecureChat client v1.0"
   puts "Choose an option:"
   puts "1) register server fingerprint on the local db"
@@ -758,6 +873,7 @@ include Utils
   puts "4) obtain the keys for e2ee for a given username"
   puts "5) Starts communication with a given username"
   puts "6) Fetch messages on the server"
+  puts "7) Continue a previosly started chat"
   choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
 
@@ -794,23 +910,58 @@ include Utils
       end
     when 5
       if handshake_info && nonce_session
-      client.e2ee_first_message(handshake_info, nonce_session)
-    else
-      handshake_info = client.hello_server()
-      nonce_session = Session.new("server", handshake_info[:client_nonce])
-      client.e2ee_first_message(handshake_info, nonce_session)
-    end
+        client.e2ee_first_message(handshake_info, nonce_session)
+      else
+        handshake_info = client.hello_server()
+        nonce_session = Session.new("server", handshake_info[:client_nonce])
+        client.e2ee_first_message(handshake_info, nonce_session)
+      end
     when 6
       if handshake_info && nonce_session
-      client.e2ee_ask_messages(handshake_info, nonce_session)
-    else
-      handshake_info = client.hello_server()
-      nonce_session = Session.new("server", handshake_info[:client_nonce])
-      client.e2ee_ask_messages(handshake_info, nonce_session)        
-    end
+        client.e2ee_ask_messages(handshake_info, nonce_session)
+      else
+        handshake_info = client.hello_server()
+        nonce_session = Session.new("server", handshake_info[:client_nonce])
+        client.e2ee_ask_messages(handshake_info, nonce_session)        
+      end
+    when 7
+      loop do
+        puts "Choose a username to interact with"
+        username = STDIN.gets.strip
+        raise ArgumentError, "No input provided" if username.nil?
+
+        if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+          username_id = db.get_first_value(<<~SQL,
+          SELECT username from clients_info WHERE username = ?
+          SQL
+          username
+          )
+          if username_id
+            client.e2ee_continue_chat(username, handshake_info, nonce_session)
+          else
+            puts "No existing user with username: #{username}"
+            next
+          end
+        else
+          puts "Invalid username format only alphanumerical and 0-9, 5 to 20 characters"
+          next
+        end     
+      end
+      
+      if handshake_info && nonce_session
+        client.e2ee_continue_chat(username, handshake_info, nonce_session)
+      else
+        handshake_info = client.hello_server()
+        nonce_session = Session.new("server", handshake_info[:client_nonce])  
+        client.e2ee_continue_chat(username, handshake_info, nonce_session)  
+      end
   else
     raise ArgumentError, "non existing choice"
   end
+  
+rescue
+  db&.close  
 end
   
 main
+

@@ -45,6 +45,8 @@ begin
     CREATE TABLE IF NOT EXISTS #{SESSIONS} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
 
+      role TEXT CHECK (role IN ('a','b'))
+
       local_id INTEGER NOT NULL,
       remote_id INTEGER NOT NULL,
 
@@ -64,7 +66,7 @@ begin
       UNIQUE(local_id, remote_id),
 
       FOREIGN KEY (local_id) 
-        REFERENCES clients_info(user) 
+        REFERENCES user(id) 
         ON DELETE CASCADE,
         
       FOREIGN KEY (remote_id) 

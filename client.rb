@@ -72,6 +72,97 @@ class SecureClient
     db&.close
   end
 
+  # recieve 
+  def e2ee_recieve_established_sessions(remaining_message, username)
+    offset = 0
+    
+    nonce_size_header = read_exact(remaining_message, offset, 2)
+    nonce_size = nonce_size_header.unpack1("n")
+    offset += 2
+
+    ciphertext_size_header = read_exact(remaining_message, offset, 4)
+    ciphertext_size = ciphertext_size_header.unpack1("N")
+    offset += 4
+
+    counter = read_exact(remaining_message, offset, 4)
+    offset += 4
+
+    raise ProtocolError, "Mismatch between declared size and received message" unless remaining_message.bytesize == 2 + 4 + 4 + nonce_size + ciphertext_size
+
+    nonce = read_exact(remaining_message, offset, nonce_size)
+    offset += nonce_size
+    
+    ciphertext = read_exact(remaining_message, offset, ciphertext_size)
+    
+    db = SQLite3::Database.new(DB_FILE)
+    db.result_as_hash = true
+
+    show_chat(username)
+    puts "New messages:"
+
+    begin 
+      previous_session = db.get_first_row(<<~SQL,
+        SELECT * FROM sessions
+        WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
+        SQL
+        username
+      )
+      id_pub_keys = db.execute(<<~SQL,
+        SELECT user.identity_public_key AS local, cli.identity_public_key AS remote
+        FROM user JOIN clients_info cli
+        WHERE cli.id = ?
+        SQL
+        previous_session["remote_id"]
+      )
+
+    rescue
+      raise ProtocolError, "Something wrong happened during db operations"
+    end
+
+    local_id_pub_key = id_pub_keys[0]["local"]
+    remote_id_pub_key = id_pub_keys[0]["remote"]
+
+    if local_id_pub_key < remote_id_pub_key
+      send_dir = :a_to_b
+      recv_dir = :b_to_a
+    else
+      send_dir = :b_to_a
+      recv_dir = :a_to_b
+    end
+    
+    recv_chain_key = previous_session["#{recv_dir}_chain_key"]
+    recv_index = previous_sessions["#{recv_dir}_index"]
+    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+    
+    secret_root_box = RbNaCl::SecretBox.new(message_key)
+    next_recv_chain_key = RbNaCl::Hash.sha2(recv_chain_key + "CHAIN")
+
+    recv_index += 1
+
+    plain_text = secret_root_box.open(nonce, ciphertext)
+    db.transaction do
+      db.execute(<<~SQL,
+        INSERT INTO messages (sender_id, message)
+      SQL
+      [previous_session["remote_id"], plain_text]
+      )
+      
+      r_key = "#{recv_dir}_chain_key"
+      r_index = "#{recv_dir}_index"
+      
+      db.execute(<<~SQL,
+        UPDATE sessions
+        SET #{r_key} = ?, #{r_index} = ?
+        WHERE id = ?
+      SQL
+      [next_recv_chain_key, recv_index, previous_session["remote_id"]]
+      )
+    end  
+  rescue
+    db&.close  
+  end
+
+  
   # continue a previously started chat
   def e2ee_continue_chat(username, handshake_info, nonce_session)
     db = SQLite3::Database.new(DB_FILE)
@@ -79,14 +170,98 @@ class SecureClient
 
     show_chat(username)  
 
-    session_id = db.get_first_row(<<~SQL,
-      SELECT id FROM sessions
-      WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
-      ORDER by id ASC
-      SQL
-      username
+    begin
+      previous_session = db.get_first_row(<<~SQL,
+        SELECT * FROM sessions
+        WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
+        SQL
+        username
       )
+      id_pub_keys = db.execute(<<~SQL,
+        SELECT user.identity_public_key AS local, cli.identity_public_key AS remote 
+        FROM user JOIN clients_info cli 
+        WHERE cli.id = ?
+        SQL
+        previous_session["remote_id"]
+      )
+    rescue
+      raise "Couldn't fetch previous sessions details"
+    end
 
+    local_id_pub_key = id_pub_keys[0]["local"]
+    remote_id_pub_key = id_pub_keys[0]["remote"]
+
+    if local_id_pub_key < remote_id_pub_key
+      send_dir = :a_to_b
+      recv_dir = :b_to_a
+    else
+      send_dir = :b_to_a
+      recv_dir = :a_to_b
+    end
+    send_chain_key = previous_session["#{send_dir}_chain_key"]
+    send_index = previous_session["#{send_dir}_index"]
+    message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
+
+    secret_root_box = RbNaCl::SecretBox.new(message_key)
+    next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
+
+    nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
+    nonce_size = [nonce.bytesize].pack("n")
+    message = "my nice message"
+
+    ciphertext = secret_root_box.box(nonce, message)
+    ciphertext_size = [ciphertext.bytesize].pack("N")
+
+    counter = [send_index].pack("N")
+
+    payload =
+      MSG_CLI_TO_CLI_SUBSEQUENT_MESSAGE +
+      nonce_size +
+      ciphertext_size +
+      counter +
+      nonce +
+      ciphertext
+     
+    send_index += 1
+    
+    sock = handshake_info[:sock]
+    server_box = handshake_info[:client_box]
+    
+    username_size = [username.bytesize].pack("C")
+    payload_size = [payload.bytesize].pack("N")
+    
+    message = 
+      MSG_CLIENT_E2EE_FIRST_MESSAGE +
+      username_size +
+      payload_size +
+      username +
+      payload
+      
+    sender(sock, server_box, nonce_session, message)
+    
+    returned_payload = read_blob(sock)
+    
+    plain_text = decipher(returned_payload, server_box)
+    
+    message_sliced = message.byteslice(1..)
+    digest = RbNaCl::Hash.sha256(message_sliced)
+    
+    if plain_text == digest 
+      puts "Message properly uploaded"   
+
+      begin
+        db.transaction do
+        local_id = db.get_first_value("SELECT id FROM user")
+        remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
+        s_key = "#{send_dir}_chain_key"
+        s_index = "#{send_dir}_index"
+        db.execure(<<~SQL,
+          UPDATE sessions 
+          SET #{s_key} = ?, #{s_index} = ?
+          WHERE id = ?
+        SQL
+        [next_send_chain_key, send_index, previous_session["id"]]
+        )
   rescue
     db&.close
   end
@@ -117,7 +292,7 @@ class SecureClient
       if session == nil
         raise ProtocolError, "There is no active session among the users, but the remot user asks to continue a pre established one"
       else
-        e2ee_peer_message(remaining_message, username)    
+        e2ee_recieve_established sessions(remaining_message, username)    
       end
     end
   rescue
@@ -322,7 +497,13 @@ class SecureClient
           SQL
           [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, recv_chain_key, recv_index]
         )
-
+        db.execute(
+          <<~SQL,
+            DELETE FROM one_time_prekeys 
+            WHERE one_time_public_key = ?
+          SQL
+          local_ot_pub_key_used  
+          )
       end
     rescue
       raise ProtocolError, "Coulnd't save the user message on the local db"
@@ -492,7 +673,7 @@ class SecureClient
             (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})  
             VALUES (?, ?, ?, ?, ?, ?, ?)
           SQL
-          [local_id, remote_id, root_key, send_chain_key, send_index, recv_chain_key, recv_index]
+          [local_id, remote_id, root_key, next_send_chain_key, send_index, recv_chain_key, recv_index]
         )
 
         end

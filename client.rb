@@ -45,6 +45,7 @@ MSG_CLIENT_E2EE_FIRST_MESSAGE_RESPONSE = "\x0c"
 MSG_CLI_TO_CLI_FIRST_MESSAGE = "\x0f"
 MSG_CLIENT_E2EE_ASK_MESSAGES = "\x0d"
 MSG_SERVER_E2EE_DELIVER_MESSAGES = "\x0e"
+MSG_CLI_TO_CLI_SUBSEQUENT_MESSAGE = "\x10"
 class ProtocolError < StandardError; end
 
 class SecureClient
@@ -52,6 +53,8 @@ class SecureClient
   include Utils
   include Builders
 
+
+  # prints on screen the messages on the db
   def show_chat(username)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
@@ -72,7 +75,8 @@ class SecureClient
     db&.close
   end
 
-  # recieve 
+
+  # recieve messages for an already established session
   def e2ee_recieve_established_sessions(remaining_message, username)
     offset = 0
     
@@ -163,7 +167,7 @@ class SecureClient
   end
 
   
-  # continue a previously started chat
+  # continue a previously started chat (send a message)
   def e2ee_continue_chat(username, handshake_info, nonce_session)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
@@ -224,9 +228,6 @@ class SecureClient
      
     send_index += 1
     
-    sock = handshake_info[:sock]
-    server_box = handshake_info[:client_box]
-    
     username_size = [username.bytesize].pack("C")
     payload_size = [payload.bytesize].pack("N")
     
@@ -237,16 +238,12 @@ class SecureClient
       username +
       payload
       
-    sender(sock, server_box, nonce_session, message)
-    
-    returned_payload = read_blob(sock)
-    
-    plain_text = decipher(returned_payload, server_box)
-    
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
-    
-    if plain_text == digest 
+
+    server_answer = finalizer(nonce_session, handshake_info, message)
+
+    if server_answer == digest 
       puts "Message properly uploaded"   
 
       begin
@@ -327,21 +324,52 @@ class SecureClient
     end
   end
 
+
+  def keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
+
+    a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
+    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+
+    session = {
+      a_to_b_chain_key: a_to_b_chain_key,
+      a_to_b_index = 0,
+      b_to_a_chain_key: b_to_a_chain_key,
+      b_to_a_index = 0
+    }
+
+    if local_id_pub_key < remote_id_pub_key
+      send_dir = :a_to_b
+      recv_dir = :b_to_a
+    else
+      send_dir = :b_to_a
+      recb_dir = :a_to_b
+    end
+
+    def chain_key_for(session, direction)
+      session[:"#{direction}_chain_key"]
+    end
+
+    def index_for(session, direction)
+      session[:"#{direction}_index"]
+    end
+
+    send_chain_key = chain_key_for(session, send_dir)
+    recv_chain_key = chain_key_for(session, recv_dir)
+    send_index = index_for(session, send_dir)
+    recv_index = index_for(session, recv_dir)
+
+    role = {send_dir: send_dir, recv_dir: recv_dir, send_key: send_chain_key, recv_key: recv_chain_key, send_index: send_index, recv_index: recv_index}
+    role
+  end
+
   
   # ask the server if there's messages in the queue and fetch them
   def e2ee_ask_messages(handshake_info, nonce_session)
-    sock = handshake_info[:sock]
-    server_box = handshake_info[:client_box]
 
     message = MSG_CLIENT_E2EE_ASK_MESSAGES
-    sender(sock, server_box, nonce_session, message)
 
-    # obtain server answer
-    returned_payload = read_blob(sock)
-
-    # decipher server answer
-    plain_text = decipher(returned_payload, server_box)
-    handler_caller(plain_text)
+    server_answer = finalizer(nonce_session, handshake_info, message)
+    handler_caller(server_answer)
 
   end
 
@@ -403,7 +431,10 @@ class SecureClient
     db.results_as_hash = true
     begin
       keys = db.get_first_row(<<-SQL,
-        SELECT pre.private_signed_prekey AS signed, user.identity_public_key AS id_pub , user.identity_private_key AS id_pri, otp.one_time_private_key AS ot
+        SELECT pre.private_signed_prekey AS signed, 
+          user.identity_public_key AS id_pub , 
+          user.identity_private_key AS id_pri,
+          otp.one_time_private_key AS ot
         FROM shared_prekey pre
         JOIN user 
         JOIN one_time_prekeys otp
@@ -416,6 +447,7 @@ class SecureClient
       raise ProtocolError, "Something went wrong during db interaction"
     end
     raise "Missing keys" unless keys
+
     local_signed_pri_key = keys["signed"]
     local_id_pri_key = keys["id_pri"]
     local_id_pub_key = keys["id_pub"]
@@ -429,36 +461,13 @@ class SecureClient
     combined_secrets = dh1+dh2+dh3+dh4
     root_key = RbNaCl::Hash.sha256(combined_secrets)
 
-
-    a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
-    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
-
-    session = {
-      a_to_b_chain_key: a_to_b_chain_key,
-      a_to_b_index: 0,
-      b_to_a_chain_key: b_to_a_chain_key,
-      b_to_a_index: 0
-    }
-
-    if local_id_pub_key < remote_id_pub_key      
-      send_dir = :a_to_b
-      recv_dir = :b_to_a
-    else
-      send_dir = :b_to_a
-      recv_dir = :a_to_b
-    end
-
-    def chain_key_for(session, direction)
-      session[:"#{direction}_chain_key"]
-    end
-
-    def index_for(session, direction)
-      session[:"#{direction}_index"]
-    end
-    send_chain_key = chain_key_for(session, send_dir)
-    recv_chain_key = chain_key_for(session, recv_dir)
-    send_index = index_for(session, send_dir)
-    recv_index = index_for(session, recv_dir)
+    elements = keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
+    send_dir = elements[:send_dir]
+    recv_dir = elements[:recv_dir]
+    send_chain_key = elements[:send_key]
+    recv_chain_key = elements[:recv_key]
+    send_index = elements[:send_index]
+    recv_index = elements[:recv_index]
 
     message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
 
@@ -563,39 +572,14 @@ class SecureClient
       combined_secrets = dh1+dh2+dh3+dh4
       root_key = RbNaCl::Hash.sha256(combined_secrets)
 
-      a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
-      b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+      elements = keys_and_index(keys, root_key, local_identity_pub_key, remote_id_pub_key)
 
-      session = {
-        a_to_b_chain_key: a_to_b_chain_key,
-        a_to_b_index: 0,
-        b_to_a_chain_key: b_to_a_chain_key,
-        b_to_a_index: 0
-      }
-
-      if local_identity_pub_key < remote_id_pub_key
-        send_dir = :a_to_b
-        recv_dir = :b_to_a
-      else
-        send_dir = :b_to_a
-        recv_dir = :a_to_b
-      end
-
-      def chain_key_for(session, direction)
-        session[:"#{direction}_chain_key"]
-      end
-  
-      def index_for(session, direction)
-        session[:"#{direction}_index"]
-      end
-
-      a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
-      b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
-
-      send_chain_key = chain_key_for(session, send_dir)
-      recv_chain_key = chain_key_for(session, recv_dir)
-      send_index = index_for(session, send_dir)
-      recv_index = index_for(session, recv_dir)
+      send_dir = elements[:send_dir]
+      recv_dir = elements[:recv_dir]
+      send_chain_key = elements[:send_key]
+      recv_chain_key = elements[:recv_key]
+      send_index = elements[:send_index]
+      recv_index = elements[:recv_index]
 
       message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
 
@@ -633,8 +617,6 @@ class SecureClient
       ciphertext
 
     send_index += 1  
-    sock = handshake_info[:sock]
-    server_box = handshake_info[:client_box]
 
     username_size = [username.bytesize].pack("C")
     payload_size = [payload.bytesize].pack("N")
@@ -646,17 +628,12 @@ class SecureClient
       username +
       payload
 
-    sender(sock, server_box, nonce_session, message)
-    # obtain server answer
-    returned_payload = read_blob(sock)
-
-    # decipher server answer
-    plain_text = decipher(returned_payload, server_box)
+    server_answer = finalizer(nonce_session, handshake_info, message)
 
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
 
-    if plain_text == digest
+    if server_answer == digest
     puts "Message properly uploaded"
     
       begin
@@ -733,21 +710,12 @@ class SecureClient
 
     raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
 
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
-
     username_payload = 
       MSG_CLIENT_E2EE_KEYS_REQUEST + 
       username_size +
       username
-    sender(sock, safe_box, nonce_session, username_payload)
-
-    # obtain server answer
-    returned_payload = read_blob(sock)
-
-    # decipher server answer
-    plain_text = decipher(returned_payload, safe_box)
-    response = handler_caller(plain_text)
+    server_answer = finalizer(nonce_session, handshake_info, username_payload)
+    handler_caller(server_answer)
   end
 
 
@@ -810,20 +778,11 @@ class SecureClient
     end
     payload = e2ee_builder(username, @host_pk.to_bytes, host_id_pub_key, signed_pk_bytes, signed_prekeys_sig,  one_time_prekeys, 49)
 
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
 
-    message = MSG_CLIENT_E2EE_KEYS_SHARE + payload
-    sender(sock, safe_box, nonce_session, message)
-
-    returned_payload = read_blob(sock)
-
-
-    # decipher server answer
-    plain_text = decipher(returned_payload, safe_box)
+    server_return = finalizer(nonce_session, handshake_info, message)    
 
     digest = RbNaCl::Hash.sha256(payload)
-    raise ProtocolError, "Server payload digest mismatch" unless digest == plain_text
+    raise ProtocolError, "Server payload digest mismatch" unless digest == server_return
 
   rescue
     db&.close
@@ -867,9 +826,6 @@ class SecureClient
 
     raise ArgumentError, "Please register a username first during database setup" unless nickname 
 
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
-
     # obtain the voucher
     puts "Insert a valid voucher:"
     while true
@@ -886,17 +842,21 @@ class SecureClient
     # build the package containing the registration data: request_id, nickname, voucher
     registration_data = registration_builder(nickname, voucher)
 
-    # cipher and send the data
+    server_return = finalizer(nonce_session, handshake_info, registration_data)
+    handler_caller(server_return)
+  ensure
+    db&.close  
+  end
+
+  # method called to handle the last phase of each method, sends packet and returns the deciphered answer
+  def finalizer(nonce_session, handshake_info, message)
+    sock = handshake_info[:sock]
+    safe_box = handshake_info[:client_box]
+  
     sender(sock, safe_box, nonce_session, registration_data)
-
-    # obtain server answer
     returned_payload = read_blob(sock)
-
-    # decipher server answer
     plain_text = decipher(returned_payload, safe_box)
-
-    # remove the request_id byte and call appropriate function for the server response analysis
-    handler_caller(plain_text)
+    plain_text    
   end
 
 

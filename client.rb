@@ -27,7 +27,7 @@ require 'sqlite3'
 # main method
   # main()
 
-DB_FILE = "/home/kali/schat_db/client1.db"
+DB_FILE = "/home/kali/schat_db/client2.db"
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -52,6 +52,7 @@ class SecureClient
 
   include Utils
   include Builders
+  include HKDF
 
 
   # prints on screen the messages on the db
@@ -76,8 +77,105 @@ class SecureClient
   end
 
 
+  # in case a message arrives that has an index higher than the expected one, we store 
+  # for later reference the keys to decipher the old messages
+  def store_skipped_keys(session_id, key, counter, nonce)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    begin
+      keys_blob = db.get_first_value(<<~SQL,
+        SELECT  skipped_keys
+        FROM sessions
+        WHERE id = ?
+      SQL
+      session_id
+      )
+
+    counter_packed = [counter].pack("N")
+    
+    if keys_blob == nil
+      keys_blob = key + counter_packed
+    else
+      keys_blob = keys_blob + key + counter_packed + nonce
+    end   
+      
+      db.execute(<<~SQL,
+        UPDATE sessions
+        SET skipped_keys = ?
+        WHERE id = ?
+      SQL
+      [keys_blob, session_id]
+      )
+
+    rescue
+      raise ProtocolErro, "Something wrong happened during db operation"
+    end
+
+  rescue
+    db&.close
+  end
+
+
+  # in case we obtain a message that was supposed to arrive earlier, we still can decipher it
+  # thanks to the previously saved message keys
+  def decipher_old_messages(counter, session_id, ciphertext, remote_id)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    binding.pry
+    begin
+      keys_blob = db.get_first_value(<<~SQL,
+        SELECT  skipped_keys
+        FROM sessions
+        WHERE id = ? 
+      SQL
+      session_id
+      )
+    rescue
+      raise ProtocolError, "Something Wrong happened during db operations"
+    end
+    
+    unless keys_blob.bytesize % 36 == 0
+      raise ProtocolError "Something wrong happened during keys recovery, some might be lost for good"
+    end  
+
+    total_keys = keys_blob.bytesize / 36
+
+    # p is used to obtain the right position for each blob key 50 bytes: 32 key, 4 index key, 24 nonce to decipher 
+    total_keys.times do |i|
+      p = i * (32 + 4 + 24) 
+      index = keys_blob[p+32..p+35]
+
+      if index.unpack1("N")
+      message_key = keys_blob[p+0..p+31]
+      nonce = keys_blob[p+36..p+49]
+        break
+      end
+    end
+
+    secret_root_box = RbNaCl::SecretBox.new(message_key)
+    plain_text = secret_root_box.open(nonce, ciphertext)
+
+    #how do I fix that this message is out of place? Should I add a time and date from the sender side? 
+    # maybe from server side?
+    begin
+      db.execute(<<~SQL,
+        INSERT INTO messages (sender_id, message)
+      SQL
+      [previous_session["remote_id"], plain_text]
+      )
+    rescue
+      raise ProtocolError, "Something Wrong happened during db operations"
+    end
+
+  rescue
+    db&.close
+  end
+
+
   # recieve messages for an already established session
   def e2ee_recieve_established_sessions(remaining_message, username)
+
     offset = 0
     
     nonce_size_header = read_exact(remaining_message, offset, 2)
@@ -88,7 +186,8 @@ class SecureClient
     ciphertext_size = ciphertext_size_header.unpack1("N")
     offset += 4
 
-    counter = read_exact(remaining_message, offset, 4)
+    counter_header = read_exact(remaining_message, offset, 4)
+    counter = counter_header.unpack1("N")
     offset += 4
 
     raise ProtocolError, "Mismatch between declared size and received message" unless remaining_message.bytesize == 2 + 4 + 4 + nonce_size + ciphertext_size
@@ -97,13 +196,12 @@ class SecureClient
     offset += nonce_size
     
     ciphertext = read_exact(remaining_message, offset, ciphertext_size)
-    
+
     db = SQLite3::Database.new(DB_FILE)
-    db.result_as_hash = true
+    db.results_as_hash = true
 
     show_chat(username)
     puts "New messages:"
-
     begin 
       previous_session = db.get_first_row(<<~SQL,
         SELECT * FROM sessions
@@ -133,14 +231,32 @@ class SecureClient
       send_dir = :b_to_a
       recv_dir = :a_to_b
     end
-    
-    recv_chain_key = previous_session["#{recv_dir}_chain_key"]
-    recv_index = previous_sessions["#{recv_dir}_index"]
-    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
-    
-    secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_recv_chain_key = RbNaCl::Hash.sha2(recv_chain_key + "CHAIN")
 
+    recv_chain_key = previous_session["#{recv_dir}_chain_key"]
+    recv_index = previous_session["#{recv_dir}_index"]
+    binding.pry
+    if counter > recv_index
+      difference = counter - recv_index
+      raise "Too many skipped messages" if difference > 200
+      puts "A number of message(s) is lost in action: #{difference}"
+      puts "Deciphering the message we received in the meantime"
+
+      skipped_recv_chain_key = recv_chain_key
+      difference.times do |i|
+        message_key = RbNaCl::Hash.sha256(skipped_recv_chain_key + "MESSAGE")
+        skipped_recv_chain_key = RbNaCl::Hash.sha256(skipped_recv_chain_key + "CHAIN")
+
+        store_skipped_keys(previous_session["id"], message_key, recv_index + i, nonce)
+      end
+
+      recv_chain_key = skipped_recv_chain_key
+    elsif counter < recv_index
+      decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"])    
+    end
+
+    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+    secret_root_box = RbNaCl::SecretBox.new(message_key)
+    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
     recv_index += 1
 
     plain_text = secret_root_box.open(nonce, ciphertext)
@@ -173,7 +289,6 @@ class SecureClient
     db.results_as_hash = true
 
     show_chat(username)  
-
     begin
       previous_session = db.get_first_row(<<~SQL,
         SELECT * FROM sessions
@@ -204,8 +319,8 @@ class SecureClient
     end
     send_chain_key = previous_session["#{send_dir}_chain_key"]
     send_index = previous_session["#{send_dir}_index"]
-    message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
 
+    message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
 
@@ -240,25 +355,27 @@ class SecureClient
       
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
-
     server_answer = finalizer(nonce_session, handshake_info, message)
-
+    puts "as"
     if server_answer == digest 
       puts "Message properly uploaded"   
 
       begin
         db.transaction do
-        local_id = db.get_first_value("SELECT id FROM user")
-        remote_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
-        s_key = "#{send_dir}_chain_key"
-        s_index = "#{send_dir}_index"
-        db.execure(<<~SQL,
-          UPDATE sessions 
-          SET #{s_key} = ?, #{s_index} = ?
-          WHERE id = ?
-        SQL
-        [next_send_chain_key, send_index, previous_session["id"]]
-        )
+          s_key = "#{send_dir}_chain_key"
+          s_index = "#{send_dir}_index"
+          db.execute(<<~SQL,
+            UPDATE sessions 
+            SET #{s_key} = ?, #{s_index} = ?
+            WHERE id = ?
+          SQL
+          [next_send_chain_key, send_index, previous_session["id"]]
+          )
+        end
+      rescue
+        raise ProtocolError, "Something wrong happened during db operation"
+      end  
+    end  
   rescue
     db&.close
   end
@@ -276,7 +393,7 @@ class SecureClient
         SELECT id FROM sessions WHERE remote_id = (
           SELECT id FROM clients_info WHERE username = ?)
         SQL
-        username
+        username.force_encoding("UTF-8")
       )
     case flag
     when "\x0f"
@@ -289,7 +406,7 @@ class SecureClient
       if session == nil
         raise ProtocolError, "There is no active session among the users, but the remot user asks to continue a pre established one"
       else
-        e2ee_recieve_established sessions(remaining_message, username)    
+        e2ee_recieve_established_sessions(remaining_message, username)    
       end
     end
   rescue
@@ -327,14 +444,14 @@ class SecureClient
 
   def keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
 
-    a_to_b_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-A-TO-B")
-    b_to_a_chain_key = RbNaCl::Hash.sha256(root_key + "CHAIN-B-TO-A")
+    a_to_b_chain_key = HKDF.expand(prk, "CHAIN-A-TO-B", 32)
+    b_to_a_chain_key = HKDF.expand(prk, "CHAIN-B-TO-A", 32)
 
     session = {
       a_to_b_chain_key: a_to_b_chain_key,
-      a_to_b_index = 0,
+      a_to_b_index: 0,
       b_to_a_chain_key: b_to_a_chain_key,
-      b_to_a_index = 0
+      b_to_a_index: 0
     }
 
     if local_id_pub_key < remote_id_pub_key
@@ -459,7 +576,7 @@ class SecureClient
     dh4 = dh(local_ot_pri_key, remote_eph_pub_key)
 
     combined_secrets = dh1+dh2+dh3+dh4
-    root_key = RbNaCl::Hash.sha256(combined_secrets)
+    root_key = HKDF.extract(combined_secrets)
 
     elements = keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
     send_dir = elements[:send_dir]
@@ -470,7 +587,6 @@ class SecureClient
     recv_index = elements[:recv_index]
 
     message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
-
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
 
@@ -570,7 +686,7 @@ class SecureClient
       dh4 = dh(ephemeral_sk_bytes, remote_ot_pub_key)
 
       combined_secrets = dh1+dh2+dh3+dh4
-      root_key = RbNaCl::Hash.sha256(combined_secrets)
+      root_key = HKDF.extract(combined_secrets)
 
       elements = keys_and_index(keys, root_key, local_identity_pub_key, remote_id_pub_key)
 
@@ -582,7 +698,6 @@ class SecureClient
       recv_index = elements[:recv_index]
 
       message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
-
       secret_root_box = RbNaCl::SecretBox.new(message_key)
       next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
     rescue
@@ -853,7 +968,7 @@ class SecureClient
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
   
-    sender(sock, safe_box, nonce_session, registration_data)
+    sender(sock, safe_box, nonce_session, message)
     returned_payload = read_blob(sock)
     plain_text = decipher(returned_payload, safe_box)
     plain_text    
@@ -1078,7 +1193,15 @@ include Utils
           username
           )
           if username_id
-            client.e2ee_continue_chat(username, handshake_info, nonce_session)
+
+            if handshake_info && nonce_session
+              client.e2ee_continue_chat(username, handshake_info, nonce_session)
+            else  
+              handshake_info = client.hello_server()
+              nonce_session = Session.new("server", handshake_info[:client_nonce])
+              client.e2ee_continue_chat(username, handshake_info, nonce_session)
+            end
+            
           else
             puts "No existing user with username: #{username}"
             next
@@ -1089,13 +1212,6 @@ include Utils
         end     
       end
       
-      if handshake_info && nonce_session
-        client.e2ee_continue_chat(username, handshake_info, nonce_session)
-      else
-        handshake_info = client.hello_server()
-        nonce_session = Session.new("server", handshake_info[:client_nonce])  
-        client.e2ee_continue_chat(username, handshake_info, nonce_session)  
-      end
   else
     raise ArgumentError, "non existing choice"
   end

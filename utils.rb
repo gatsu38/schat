@@ -374,7 +374,29 @@ MAX_FIELD_SIZE = 1024
     true
 
   end
-
-
 end
+
+module HKDF
+  HASH_LEN = 32
+
+  def self.extract(ikm, salt = nil)
+    salt ||= "\x00" * HASH_LEN
+    RbNaCl::HMAC.sha256(salt, ikm)
+  end
+
+  def self.expand(prk, info, length = HASH_LEN)
+    t = ""
+    okm = ""
+    counter = 1
+
+    while okm.bytesize < length
+      t = RbNaCl::HMAC.sha256(prk, t + info + counter.chr)
+      okm << t
+      counter += 1
+    end
+
+    okm.byteslice(0, length)
+  end
+end
+
 

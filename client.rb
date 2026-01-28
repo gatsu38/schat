@@ -52,15 +52,26 @@ class SecureClient
   include HKDF
 
 
+  def connect
+    sock = TCPSocket.new(@host, @port)
+    sock
+  rescue Errno::ECONNREFUSED,
+    Errno::EHOSTUNREACH,
+    Errno::ETIMEDOUT,
+    SocketError => e
+    puts "❌ Server unavailable (#{e.message})"
+  end
+
+
   # show the currents users in the clients info db
   def show_users()
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
     users = db.execute("SELECT username FROM clients_info")
 
-    users.each do |u| puts u["username"] end
+    users.each do |u| puts safe_terminal_print(u["username"]) end
 
-  rescuse
+  rescue
     db&.close
   end
 
@@ -1048,7 +1059,6 @@ class SecureClient
 
    # used to establish a safe comunication channel with the server
   def hello_server()
-
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
@@ -1056,8 +1066,10 @@ class SecureClient
     puts "created: ephemeral private key, public key and signature"
 
     # establish a connection with the server
-    sock = TCPSocket.new(@host, @port)
+    sock = connect()
+    return unless sock 
     puts "TCP connection established"
+      
 
     # protocol name + padding preparation
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
@@ -1160,13 +1172,14 @@ class SecureClient
 end
 
 def main
-include Utils
 
   db = SQLite3::Database.new(DB_FILE)
   db.results_as_hash = true
 
-
   puts "Schat. SecureChat client v1.0"
+
+  loop do
+  puts "\n"
   puts "Choose an option:"
   puts "1) register server fingerprint on the local db"
   puts "2) register the client with the server"
@@ -1190,16 +1203,17 @@ include Utils
       # -inside handshake info there is all the info concerning the connection:
       # - used to ask the server to register our client nickname and voucher
       handshake_info = client.hello_server()
+      next unless handshake_info
 
-      # -create and get the nonce ready
       nonce_session = Session.new("server", handshake_info[:client_nonce])
-
       client.registration_request(handshake_info, nonce_session)
     when 3
       if handshake_info && nonce_session
         client.e2ee_keys_share(handshake_info, nonce_session)
       else
         handshake_info = client.hello_server()
+        next unless handshake_info
+        
         nonce_session = Session.new("server", handshake_info[:client_nonce])
         client.e2ee_keys_share(handshake_info, nonce_session)
       end
@@ -1208,6 +1222,8 @@ include Utils
         client.e2ee_keys_request(handshake_info, nonce_session)
       else
         handshake_info = client.hello_server()
+        next unless handshake_info
+        
         nonce_session = Session.new("server", handshake_info[:client_nonce])    
         client.e2ee_keys_request(handshake_info, nonce_session)        
       end
@@ -1216,6 +1232,8 @@ include Utils
         client.e2ee_first_message(handshake_info, nonce_session)
       else
         handshake_info = client.hello_server()
+        next unless handshake_info
+        
         nonce_session = Session.new("server", handshake_info[:client_nonce])
         client.e2ee_first_message(handshake_info, nonce_session)
       end
@@ -1224,12 +1242,15 @@ include Utils
         client.e2ee_ask_messages(handshake_info, nonce_session)
       else
         handshake_info = client.hello_server()
+        next unless handshake_info
+        
         nonce_session = Session.new("server", handshake_info[:client_nonce])
         client.e2ee_ask_messages(handshake_info, nonce_session)        
       end
     when 7
       loop do
         puts "Choose a username to interact with"
+
         username = STDIN.gets.strip
         raise ArgumentError, "No input provided" if username.nil?
 
@@ -1243,10 +1264,12 @@ include Utils
 
             if handshake_info && nonce_session
               client.e2ee_continue_chat(username, handshake_info, nonce_session)
+              break
             else  
               handshake_info = client.hello_server()
               nonce_session = Session.new("server", handshake_info[:client_nonce])
               client.e2ee_continue_chat(username, handshake_info, nonce_session)
+              break
             end
             
           else
@@ -1259,21 +1282,27 @@ include Utils
         end     
       end
     when 8
-      puts "Choose a username to interact with"
-      username = STDIN.gets.strip
-      raise ArgumentError, "No input provided" if username.nil?
+      loop do
+        puts "Choose a username to interact with"
+        username = STDIN.gets.strip
+        raise ArgumentError, "No input provided" if username.nil?
 
-      if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-        client.show_chat(username)
+        if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+          client.show_chat(username)
+          break
+        end
       end
     when 9
       client.show_users()
     when 10
       puts "secret easter egg, love you all!"
   else
-    raise ArgumentError, "non existing choice"
+    puts "non existing choice"
+    next
   end
-  
+
+  # this end is for the loop
+  end
 rescue
   db&.close  
 end

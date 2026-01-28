@@ -1,8 +1,5 @@
-require 'ed25519'
 require 'socket'
 require 'rbnacl'
-require 'openssl'
-require 'securerandom'
 require_relative 'utils'
 require_relative 'builders'
 require 'pry'
@@ -55,21 +52,65 @@ class SecureClient
   include HKDF
 
 
+  # cleans a message from potential injection characters
+  def safe_terminal_print(str)
+    str
+      .encode("UTF-8", invalid: :replace, undef: :replace, replace: "�")
+      .gsub(/[\u202A-\u202E\u2066-\u2069]/, "")   # bidi controls
+      .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
+  end
+
+
+  # obtain user input for a message, accepts multiple lines
+  def user_message
+    puts "Enter your message. Finish with an empty line or Ctrl-D:"
+
+    lines = []
+
+    while (line = STDIN.gets)
+      line.chomp!
+    break if line.empty?
+      lines << line
+    end
+
+    raw_message = lines.join("\n")
+    safe_terminal_print(raw_message)
+  end
+
+
   # prints on screen the messages on the db
   def show_chat(username)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-    messages = db.execute(<<~SQL,
-      SELECT * FROM messages
-      WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
-      ORDER by id ASC
-      SQL
-      username
-      )
+
+    begin
+      db.transaction do
+
+        previous_session = db.get_first_row(<<~SQL,
+          SELECT * FROM sessions
+          WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
+          SQL
+          username.force_encoding("UTF-8")
+        )
+
+        messages = db.execute(<<~SQL,
+          SELECT * FROM messages
+          WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
+          ORDER by counter ASC
+          SQL
+          username.force_encoding("UTF-8")
+          )
+
+      end
+    rescue
+      raise ProtocolError, "Some db operation didn't work out"
+    end
 
     puts "#{username}:"
     messages.each do |msg|
-      puts msg["message"]
+      if 
+      puts "msg id counter: #{msg["*counter*"]}"
+      puts safe_terminal_print(msg["message"])
       puts "-" * 40      
     end
   rescue
@@ -92,13 +133,13 @@ class SecureClient
       session_id
       )
 
-    counter_packed = [counter].pack("N")
+      counter_packed = [counter].pack("N")
     
-    if keys_blob == nil
-      keys_blob = key + counter_packed
-    else
-      keys_blob = keys_blob + key + counter_packed + nonce
-    end   
+      if keys_blob == nil
+        keys_blob = key + counter_packed
+      else
+        keys_blob = keys_blob + key + counter_packed + nonce
+      end   
       
       db.execute(<<~SQL,
         UPDATE sessions
@@ -119,37 +160,38 @@ class SecureClient
 
   # in case we obtain a message that was supposed to arrive earlier, we still can decipher it
   # thanks to the previously saved message keys
-  def decipher_old_messages(counter, session_id, ciphertext, remote_id)
+  def decipher_old_messages(counter, session_id, ciphertext, remote_id, recv_index)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-    binding.pry
     begin
       keys_blob = db.get_first_value(<<~SQL,
-        SELECT  skipped_keys
+        SELECT skipped_keys
         FROM sessions
         WHERE id = ? 
       SQL
       session_id
       )
+
     rescue
       raise ProtocolError, "Something Wrong happened during db operations"
     end
     
-    unless keys_blob.bytesize % 36 == 0
+    unless keys_blob.bytesize % 50 == 0
       raise ProtocolError "Something wrong happened during keys recovery, some might be lost for good"
     end  
 
-    total_keys = keys_blob.bytesize / 36
+    total_keys = keys_blob.bytesize / 50
 
-    # p is used to obtain the right position for each blob key 50 bytes: 32 key, 4 index key, 24 nonce to decipher 
+    # p is used to obtain the right position for each blob is 50 bytes: 32 key, 4 index key, 24 nonce to decipher 
     total_keys.times do |i|
       p = i * (32 + 4 + 24) 
       index = keys_blob[p+32..p+35]
 
-      if index.unpack1("N")
-      message_key = keys_blob[p+0..p+31]
-      nonce = keys_blob[p+36..p+49]
+      if index.unpack1("N") == counter
+        message_key = keys_blob[p+0..p+31]
+        nonce = keys_blob[p+36..p+49]
         break
+
       end
     end
 
@@ -160,9 +202,9 @@ class SecureClient
     # maybe from server side?
     begin
       db.execute(<<~SQL,
-        INSERT INTO messages (sender_id, message)
+        INSERT INTO messages (sender_id, message, counter)
       SQL
-      [previous_session["remote_id"], plain_text]
+      [previous_session["remote_id"], plain_text, counter]
       )
     rescue
       raise ProtocolError, "Something Wrong happened during db operations"
@@ -200,14 +242,12 @@ class SecureClient
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    show_chat(username)
-    puts "New messages:"
     begin 
       previous_session = db.get_first_row(<<~SQL,
         SELECT * FROM sessions
         WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
         SQL
-        username
+        username.force_encoding("UTF-8")
       )
       id_pub_keys = db.execute(<<~SQL,
         SELECT user.identity_public_key AS local, cli.identity_public_key AS remote
@@ -234,24 +274,29 @@ class SecureClient
 
     recv_chain_key = previous_session["#{recv_dir}_chain_key"]
     recv_index = previous_session["#{recv_dir}_index"]
+
+    show_chat(username)
+    puts "New messages:"
+
     binding.pry
     if counter > recv_index
       difference = counter - recv_index
-      raise "Too many skipped messages" if difference > 200
+
       puts "A number of message(s) is lost in action: #{difference}"
       puts "Deciphering the message we received in the meantime"
+      puts "If the older messages will arrive will be deciphered with "
+      raise "Too many skipped messages" if difference > 200
 
-      skipped_recv_chain_key = recv_chain_key
       difference.times do |i|
-        message_key = RbNaCl::Hash.sha256(skipped_recv_chain_key + "MESSAGE")
-        skipped_recv_chain_key = RbNaCl::Hash.sha256(skipped_recv_chain_key + "CHAIN")
+        binding.pry
+        message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+        recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
 
         store_skipped_keys(previous_session["id"], message_key, recv_index + i, nonce)
       end
 
-      recv_chain_key = skipped_recv_chain_key
     elsif counter < recv_index
-      decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"])    
+      decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
     end
 
     message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
@@ -262,9 +307,9 @@ class SecureClient
     plain_text = secret_root_box.open(nonce, ciphertext)
     db.transaction do
       db.execute(<<~SQL,
-        INSERT INTO messages (sender_id, message)
+        INSERT INTO messages (sender_id, message, counter)
       SQL
-      [previous_session["remote_id"], plain_text]
+      [previous_session["remote_id"], plain_text, recv_index - 1]
       )
       
       r_key = "#{recv_dir}_chain_key"
@@ -288,13 +333,12 @@ class SecureClient
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
-    show_chat(username)  
     begin
       previous_session = db.get_first_row(<<~SQL,
         SELECT * FROM sessions
         WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
         SQL
-        username
+        username.force_encoding("UTF-8")
       )
       id_pub_keys = db.execute(<<~SQL,
         SELECT user.identity_public_key AS local, cli.identity_public_key AS remote 
@@ -326,7 +370,7 @@ class SecureClient
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
-    message = "my nice message"
+    message = user_message()
 
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
@@ -604,10 +648,10 @@ class SecureClient
         [username.force_encoding("UTF-8"), remote_signing_pub_key, remote_id_pub_key, signature]
         )
         db.execute(<<~SQL,
-          INSERT INTO messages (sender_id, message) 
+          INSERT INTO messages (sender_id, message, counter) 
           VALUES (?, ?)
         SQL
-        [username_id[0]["id"], plain_text]        
+        [username_id[0]["id"], plain_text, recv_index - 1]        
         )
 
         s_key   = "#{send_dir}_chain_key"
@@ -706,7 +750,7 @@ class SecureClient
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
-    message = "my nice message"
+    message = user_message()
     
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")

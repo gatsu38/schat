@@ -31,6 +31,7 @@ begin
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sender_id INTEGER NOT NULL,
       message BLOB NOT NULL,
+      counter INTEGER NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
       FOREIGN KEY (sender_id)

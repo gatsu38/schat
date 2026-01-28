@@ -227,7 +227,6 @@ class SecureServer
   # wrapper around the e2ee receiver to make the checks 
   def e2ee_server_share_receiver_wrapper(payload, handshake_info)
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
- 
     username = e_material[:username]
     signing_pub_key = e_material[:signing_pub_key]
     identity_pub_key = e_material[:identity_pub_key]

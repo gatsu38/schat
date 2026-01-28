@@ -24,7 +24,6 @@ begin
 
   db = SQLite3::Database.new("/home/kali/schat_db/#{db_name}.db")
 
-
   # contains the messages sent by other users
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{MESSAGES} (
@@ -45,8 +44,6 @@ begin
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{SESSIONS} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-      role TEXT CHECK (role IN ('a','b'))
 
       local_id INTEGER NOT NULL,
       remote_id INTEGER NOT NULL,
@@ -93,7 +90,6 @@ begin
     );
   SQL
 
-binding.pry
 
   # contains other users info
   db.execute <<-SQL

@@ -52,6 +52,19 @@ class SecureClient
   include HKDF
 
 
+  # show the currents users in the clients info db
+  def show_users()
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    users = db.execute("SELECT username FROM clients_info")
+
+    users.each do |u| puts u["username"] end
+
+  rescuse
+    db&.close
+  end
+
+
   # cleans a message from potential injection characters
   def safe_terminal_print(str)
     str
@@ -82,17 +95,15 @@ class SecureClient
   def show_chat(username)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-
+    messages = []
     begin
       db.transaction do
-
         previous_session = db.get_first_row(<<~SQL,
           SELECT * FROM sessions
           WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
           SQL
           username.force_encoding("UTF-8")
         )
-
         messages = db.execute(<<~SQL,
           SELECT * FROM messages
           WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
@@ -100,16 +111,13 @@ class SecureClient
           SQL
           username.force_encoding("UTF-8")
           )
-
       end
     rescue
       raise ProtocolError, "Some db operation didn't work out"
     end
-
     puts "#{username}:"
     messages.each do |msg|
-      if 
-      puts "msg id counter: #{msg["*counter*"]}"
+      puts "msg id counter: #{msg["counter"]}"
       puts safe_terminal_print(msg["message"])
       puts "-" * 40      
     end
@@ -203,6 +211,7 @@ class SecureClient
     begin
       db.execute(<<~SQL,
         INSERT INTO messages (sender_id, message, counter)
+        VALUES (?, ?, ?)
       SQL
       [previous_session["remote_id"], plain_text, counter]
       )
@@ -278,7 +287,6 @@ class SecureClient
     show_chat(username)
     puts "New messages:"
 
-    binding.pry
     if counter > recv_index
       difference = counter - recv_index
 
@@ -288,9 +296,8 @@ class SecureClient
       raise "Too many skipped messages" if difference > 200
 
       difference.times do |i|
-        binding.pry
-        message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
-        recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
+        message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
+        recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
 
         store_skipped_keys(previous_session["id"], message_key, recv_index + i, nonce)
       end
@@ -299,22 +306,22 @@ class SecureClient
       decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
     end
 
-    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+    message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
+    next_recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
     recv_index += 1
 
     plain_text = secret_root_box.open(nonce, ciphertext)
     db.transaction do
       db.execute(<<~SQL,
         INSERT INTO messages (sender_id, message, counter)
+        VALUES (?, ?, ?)
       SQL
       [previous_session["remote_id"], plain_text, recv_index - 1]
       )
       
       r_key = "#{recv_dir}_chain_key"
       r_index = "#{recv_dir}_index"
-      
       db.execute(<<~SQL,
         UPDATE sessions
         SET #{r_key} = ?, #{r_index} = ?
@@ -364,9 +371,9 @@ class SecureClient
     send_chain_key = previous_session["#{send_dir}_chain_key"]
     send_index = previous_session["#{send_dir}_index"]
 
-    message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
+    message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
+    next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
 
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
@@ -382,7 +389,7 @@ class SecureClient
       nonce_size +
       ciphertext_size +
       counter +
-      nonce +
+        nonce +
       ciphertext
      
     send_index += 1
@@ -463,7 +470,6 @@ class SecureClient
   # checks if this is a new or old communication session
   def e2ee_read_server_messages_blob(handled_payload, handled_client)
     offset = 0
-    
     messages_count_header = read_exact(handled_payload, offset, 2)
     messages_count = messages_count_header.unpack1("n")
     offset += 2
@@ -488,8 +494,8 @@ class SecureClient
 
   def keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
 
-    a_to_b_chain_key = HKDF.expand(prk, "CHAIN-A-TO-B", 32)
-    b_to_a_chain_key = HKDF.expand(prk, "CHAIN-B-TO-A", 32)
+    a_to_b_chain_key = HKDF.expand(root_key, "CHAIN-A-TO-B".b, 32)
+    b_to_a_chain_key = HKDF.expand(root_key, "CHAIN-B-TO-A".b, 32)
 
     session = {
       a_to_b_chain_key: a_to_b_chain_key,
@@ -503,7 +509,7 @@ class SecureClient
       recv_dir = :b_to_a
     else
       send_dir = :b_to_a
-      recb_dir = :a_to_b
+      recv_dir = :a_to_b
     end
 
     def chain_key_for(session, direction)
@@ -582,7 +588,6 @@ class SecureClient
     unless remote_signing_pub_key_prepared.verify(signature, transcript)
       raise ProtocolError, "remote signed key is not verified"
     end
-    
     nonce = read_exact(message, offset, nonce_size)
     offset += nonce_size
 
@@ -630,9 +635,9 @@ class SecureClient
     send_index = elements[:send_index]
     recv_index = elements[:recv_index]
 
-    message_key = RbNaCl::Hash.sha256(recv_chain_key + "MESSAGE")
+    message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
-    next_recv_chain_key = RbNaCl::Hash.sha256(recv_chain_key + "CHAIN")
+    next_recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
 
     recv_index += 1
     send_index = 0
@@ -649,7 +654,7 @@ class SecureClient
         )
         db.execute(<<~SQL,
           INSERT INTO messages (sender_id, message, counter) 
-          VALUES (?, ?)
+          VALUES (?, ?, ?)
         SQL
         [username_id[0]["id"], plain_text, recv_index - 1]        
         )
@@ -658,25 +663,24 @@ class SecureClient
         s_index = "#{send_dir}_index"
         r_key   = "#{recv_dir}_chain_key"
         r_index = "#{recv_dir}_index"
-        db.execute(
-          <<~SQL,
-            INSERT INTO sessions
-            (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          SQL
-          [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, recv_chain_key, recv_index]
+        db.execute(<<~SQL,
+          INSERT INTO sessions
+          (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        SQL
+        [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, recv_chain_key, recv_index]
         )
-        db.execute(
-          <<~SQL,
-            DELETE FROM one_time_prekeys 
-            WHERE one_time_public_key = ?
-          SQL
-          local_ot_pub_key_used  
-          )
+        db.execute(<<~SQL,
+          DELETE FROM one_time_prekeys 
+          WHERE one_time_public_key = ?
+        SQL
+        local_ot_pub_key_used  
+        )
       end
     rescue
       raise ProtocolError, "Coulnd't save the user message on the local db"
     end
+    show_chat(username)
   rescue
     db&.close
   end
@@ -686,8 +690,7 @@ class SecureClient
   def e2ee_first_message(handshake_info, nonce_session)
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
-   raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-
+    raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
 
@@ -740,10 +743,9 @@ class SecureClient
       recv_chain_key = elements[:recv_key]
       send_index = elements[:send_index]
       recv_index = elements[:recv_index]
-
-      message_key = RbNaCl::Hash.sha256(send_chain_key + "MESSAGE")
+      message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
       secret_root_box = RbNaCl::SecretBox.new(message_key)
-      next_send_chain_key = RbNaCl::Hash.sha256(send_chain_key + "CHAIN")
+      next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
@@ -825,7 +827,6 @@ class SecureClient
   # wrapper around the receiver for the e2ee material 
   def e2ee_client_share_receiver_wrapper(payload, handshake_info)
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
-
     username = e_material[:username].force_encoding("UTF-8")
     signing_pub_key = e_material[:signing_pub_key]
     identity_pub_key = e_material[:identity_pub_key]
@@ -937,12 +938,12 @@ class SecureClient
     end
     payload = e2ee_builder(username, @host_pk.to_bytes, host_id_pub_key, signed_pk_bytes, signed_prekeys_sig,  one_time_prekeys, 49)
 
-
+    message = MSG_CLIENT_E2EE_KEYS_SHARE + payload
     server_return = finalizer(nonce_session, handshake_info, message)    
 
     digest = RbNaCl::Hash.sha256(payload)
     raise ProtocolError, "Server payload digest mismatch" unless digest == server_return
-
+    puts "Keys shared with success" if digest == server_return    
   rescue
     db&.close
   end
@@ -1174,6 +1175,8 @@ include Utils
   puts "5) Starts communication with a given username"
   puts "6) Fetch messages on the server"
   puts "7) Continue a previosly started chat"
+  puts "8) Show messages received from a given user"
+  puts "9) show users to interact with"
   choice = STDIN.gets.strip.to_i
   client = SecureClient.new("127.0.0.1", 2222)
 
@@ -1255,7 +1258,18 @@ include Utils
           next
         end     
       end
-      
+    when 8
+      puts "Choose a username to interact with"
+      username = STDIN.gets.strip
+      raise ArgumentError, "No input provided" if username.nil?
+
+      if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+        client.show_chat(username)
+      end
+    when 9
+      client.show_users()
+    when 10
+      puts "secret easter egg, love you all!"
   else
     raise ArgumentError, "non existing choice"
   end

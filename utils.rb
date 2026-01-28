@@ -379,9 +379,15 @@ end
 module HKDF
   HASH_LEN = 32
 
+  def self.b(str)
+    str = str.dup
+    str.force_encoding(Encoding::BINARY)
+    str
+  end
+
   def self.extract(ikm, salt = nil)
     salt ||= "\x00" * HASH_LEN
-    RbNaCl::HMAC.sha256(salt, ikm)
+    RbNaCl::HMAC::SHA256.new(b(salt)).auth(b(ikm))
   end
 
   def self.expand(prk, info, length = HASH_LEN)
@@ -389,8 +395,14 @@ module HKDF
     okm = ""
     counter = 1
 
+    t.force_encoding(Encoding::BINARY)
+    okm.force_encoding(Encoding::BINARY)
+
     while okm.bytesize < length
-      t = RbNaCl::HMAC.sha256(prk, t + info + counter.chr)
+      data = t + b(info) + counter.chr
+      data.force_encoding(Encoding::BINARY)
+
+      t = RbNaCl::HMAC::SHA256.new(b(prk)).auth( t + data)
       okm << t
       counter += 1
     end

@@ -1035,7 +1035,6 @@ class SecureClient
   def server_fingerprint_check(remote_pk)
     db = SQLite3::Database.new(DB_FILE)
     db.results_as_hash = true
-
     remote_pk_bytes = remote_pk.to_bytes
 
     # transform the public key into a human readable fingerprint
@@ -1043,7 +1042,6 @@ class SecureClient
 
     # obtain the previously registered info about the server
     server = db.get_first_row("SELECT fingerprint, server_name FROM server_identity WHERE public_key = ?", remote_pk_bytes)
-
     raise ProtocolError, "Unknown server public key" unless server
 
     registered_fingerprint = server["fingerprint"]
@@ -1062,7 +1060,6 @@ class SecureClient
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
     eph_pk = eph_sk.public_key
-
     puts "created: ephemeral private key, public key and signature"
 
     # establish a connection with the server
@@ -1070,7 +1067,6 @@ class SecureClient
     return unless sock 
     puts "TCP connection established"
       
-
     # protocol name + padding preparation
     protocol_start = protocol_name_builder(PROTOCOL_NAME, MAX_PROTO_FIELD)
 
@@ -1082,11 +1078,9 @@ class SecureClient
       protocol_start +
       MSG_CLIENT_HELLO_ID +
       client_nonce
-
     # send the first nonce to the server "client hello"
     puts "send opening nonce"
     write_all(sock, opening_message)
-
     # receive the signature and what's needed to verify it 
     puts "waiting for server signature"
     server_hello_back_payload = read_blob(sock)
@@ -1099,14 +1093,13 @@ class SecureClient
 
     # check if the server public key is the same as the registered one
     server_fingerprint_check(server_pk)
-
     # create a signature only valid for these nonces
     signature = sig_builder(server_nonce, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
 
     # create the payload to be sent together with the signature in order
     # for the server to verify the client's authenticity
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
-
+    puts "hi"
     # send the hello back to the server, completing this way the hello protocol
     write_all(sock, hello_back_payload)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
@@ -1172,7 +1165,7 @@ class SecureClient
 end
 
 def main
-
+include Utils
   db = SQLite3::Database.new(DB_FILE)
   db.results_as_hash = true
 

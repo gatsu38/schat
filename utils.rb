@@ -96,36 +96,6 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # reads the message ID and calls the appropriate message handler
-  def handler_caller(message, handshake_info = nil)
-    offset = 0
-    id = read_exact(message, offset, 1)
-    handled_message = message.byteslice(1..)
-    
-    case id
-      when "\x04"
-      response = registration_request_handler(handled_message, handshake_info) 
-      when "\x05"
-      response = registration_confirmation(handled_message)
-      when "\x08"
-      response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
-      when "\x09"
-      response = e2ee_keys_request_receiver(handled_message, handshake_info)
-      when "\x0a"
-      response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
-      when "\x0b"
-      response = e2ee_message_receiver(handled_message, handshake_info)
-      when "\x0d"
-      response = e2ee_message_harvester(handled_message, handshake_info)
-      when "\x0e" 
-      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
-    else
-      raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"  
-    end
-  response          
-  end
-
-
   # obtains the keys needed for the e2ee between two clients
   def e2ee_keys_share_receiver(payload, handshake_info)
     offset = 0

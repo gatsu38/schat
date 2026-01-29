@@ -3,8 +3,8 @@ require 'sqlite3'
 require 'rbnacl'
 require 'pry'
 require 'pry-byebug'
-# !!!! FIX PATH
-# DB_FILE = 
+require 'fileutils'
+
 USER_TABLE = 'user'
 SESSIONS = 'sessions'
 SERVER_IDENTITY = 'server_identity'
@@ -19,10 +19,23 @@ MESSAGES = 'messages'
 #end
 
 begin
-  puts "Insert db name"
-  db_name = STDIN.gets.strip
 
-  db = SQLite3::Database.new("/home/kali/schat_db/#{db_name}.db")
+  db_path = File.join(Dir.pwd, "schat_db", "client.db")
+  db_dir = File.join(__dir__, "schat_db")
+
+  if File.exist?(db_path)
+    puts "A database seems already existing proceeding will delete all the content in the database"
+    puts "press Y to continue and create a new db:"
+    answer = gets.chomp.strip.upcase
+    exit unless answer == "Y"
+  end
+
+  unless Dir.exist?(db_dir)
+    FileUtils.mkdir_p(db_dir)
+  end
+  
+  
+  db = SQLite3::Database.new(db_path)
 
   # contains the messages sent by other users
   db.execute <<-SQL

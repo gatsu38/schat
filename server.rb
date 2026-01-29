@@ -29,7 +29,7 @@ require 'sqlite3'
   # safe database shutdown
 # generate_vouchers
   # create the vouchers
-DB_FILE = '/home/kali/schat_db/schat.db'
+DB_FILE = File.join(Dir.pwd, "schat_db", "schat.db")
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
 CLIENTS_INFO = 'clients_pub_keys'
@@ -66,6 +66,37 @@ end
 class SecureServer
   include Utils
   include Builders
+
+  # reads the message ID and calls the appropriate message handler
+  def handler_caller(message, handshake_info = nil)
+    offset = 0
+    id = read_exact(message, offset, 1)
+    handled_message = message.byteslice(1..)
+
+    case id
+      when "\x04"
+      response = registration_request_handler(handled_message, handshake_info)
+      when "\x05"
+      response = registration_confirmation(handled_message)
+      when "\x08"
+      response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
+      when "\x09"
+      response = e2ee_keys_request_receiver(handled_message, handshake_info)
+      when "\x0a"
+      response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
+      when "\x0b"
+      response = e2ee_message_receiver(handled_message, handshake_info)
+      when "\x0d"
+      response = e2ee_message_harvester(handled_message, handshake_info)
+      when "\x0e"
+      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
+    else
+      raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
+    end
+  response
+  end
+
+
 
   # forward messages to the requester
   def e2ee_message_harvester(message, handshake_info)
@@ -337,6 +368,38 @@ class SecureServer
     db&.close  
   end
 
+
+  # used to confirm that the sender is registered and the content hasn't been tampered
+  def identity_verification(message)
+
+    offset = 0
+
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+    
+    public_key_declared = read_exact(message, offset, 32)    
+    offset += 32
+
+    signature_size_header = read_exact(message, offset, 2)
+    signature_size = signature_size_header.unpack1("n")
+    offset += 2
+
+    signautre = read_exact(message, offset, signature_size)
+    offset += signature_size
+
+    message_bit = read_exact(message, offset, 1)
+    identified_message = message.byteslice(offset..)    
+    if message_bit == "\x04"
+      return identified_message
+    else
+    
+    public_key_stored = db.get_first_value("SELECT id FROM clients_info WHERE ")
+    end
+    
+  rescue
+    db&.close
+  end
+  
   
   # this method is used to handle all the messages received from a single client after the hello client
   def handle_client(handshake_info, sock)
@@ -356,7 +419,8 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        response = handler_caller(message, handshake_info)
+        identified_message = identity_verification(message)
+        response = handler_caller(identified_message, handshake_info)
         sender(sock, box, nonce_session, response)
       rescue Timeout::Error
         next
@@ -527,6 +591,13 @@ class SecureServer
 
   # initialize the server class
   def initialize(port)
+
+    if !File.exist?(DB_FILE)
+      puts "Please run the server_setup.rb file first"
+      exit
+    end
+
+  
     # ip port and max number of threads
     @port = port
     @pool = Concurrent::FixedThreadPool.new(20)

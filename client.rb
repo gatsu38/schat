@@ -24,7 +24,7 @@ require 'sqlite3'
 # main method
   # main()
 
-DB_FILE = "/home/kali/schat_db/client2.db"
+DB_FILE = File.join(Dir.pwd, "schat_db", "client.db")
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -63,25 +63,33 @@ class SecureClient
   end
 
 
-  # show the currents users in the clients info db
-  def show_users()
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-    users = db.execute("SELECT username FROM clients_info")
+  # reads the message ID and calls the appropriate message handler
+  def handler_caller(message, handshake_info = nil)
+    offset = 0
+    id = read_exact(message, offset, 1)
+    handled_message = message.byteslice(1..)
 
-    users.each do |u| puts safe_terminal_print(u["username"]) end
-
-  rescue
-    db&.close
-  end
-
-
-  # cleans a message from potential injection characters
-  def safe_terminal_print(str)
-    str
-      .encode("UTF-8", invalid: :replace, undef: :replace, replace: "�")
-      .gsub(/[\u202A-\u202E\u2066-\u2069]/, "")   # bidi controls
-      .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
+    case id
+      when "\x04"
+      response = registration_request_handler(handled_message, handshake_info)
+      when "\x05"
+      response = registration_confirmation(handled_message)
+      when "\x08"
+      response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
+      when "\x09"
+      response = e2ee_keys_request_receiver(handled_message, handshake_info)
+      when "\x0a"
+      response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
+      when "\x0b"
+      response = e2ee_message_receiver(handled_message, handshake_info)
+      when "\x0d"
+      response = e2ee_message_harvester(handled_message, handshake_info)
+      when "\x0e"
+      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
+    else
+      raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
+    end
+  response
   end
 
 
@@ -99,41 +107,6 @@ class SecureClient
 
     raw_message = lines.join("\n")
     safe_terminal_print(raw_message)
-  end
-
-
-  # prints on screen the messages on the db
-  def show_chat(username)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-    messages = []
-    begin
-      db.transaction do
-        previous_session = db.get_first_row(<<~SQL,
-          SELECT * FROM sessions
-          WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
-          SQL
-          username.force_encoding("UTF-8")
-        )
-        messages = db.execute(<<~SQL,
-          SELECT * FROM messages
-          WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
-          ORDER by counter ASC
-          SQL
-          username.force_encoding("UTF-8")
-          )
-      end
-    rescue
-      raise ProtocolError, "Some db operation didn't work out"
-    end
-    puts "#{username}:"
-    messages.each do |msg|
-      puts "msg id counter: #{msg["counter"]}"
-      puts safe_terminal_print(msg["message"])
-      puts "-" * 40      
-    end
-  rescue
-    db&.close
   end
 
 
@@ -1000,7 +973,7 @@ class SecureClient
     # obtain the voucher
     puts "Insert a valid voucher:"
     while true
-      input = STDIN.gets
+      input = STDIN.gets.strip
       break unless input
       voucher = input.strip
       if voucher&.match?(/\A([a-f0-9]{30})\z/)
@@ -1019,12 +992,33 @@ class SecureClient
     db&.close  
   end
 
+
+  # adds the identity in order for the server to keep or discard the package
+  def add_identity(message)
+    db = SQLite3::Database.new(DB_FILE)
+    db.results_as_hash = true
+
+    signing_public_key = db.get_first_value("SELECT signing_public_key FROM user")
+    signature = @host_sk.sign(message)
+    signature_size = [signature.bytesize].pack("n")
+
+    identified_message = signing_public_key + signature_size + signature 
+    identified_message
+  rescue
+    db&.close
+  end
+
+
   # method called to handle the last phase of each method, sends packet and returns the deciphered answer
   def finalizer(nonce_session, handshake_info, message)
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
-  
-    sender(sock, safe_box, nonce_session, message)
+
+    identified_message = add_identity(message)
+
+    payload = identified_message + message
+    
+    sender(sock, safe_box, nonce_session, payload)
     returned_payload = read_blob(sock)
     plain_text = decipher(returned_payload, safe_box)
     plain_text    
@@ -1099,7 +1093,6 @@ class SecureClient
     # create the payload to be sent together with the signature in order
     # for the server to verify the client's authenticity
     hello_back_payload = hello_back_payload_builder(signature, eph_pk, client_nonce, "client", MSG_CLIENT_HELLO_ID2)
-    puts "hi"
     # send the hello back to the server, completing this way the hello protocol
     write_all(sock, hello_back_payload)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
@@ -1164,13 +1157,117 @@ class SecureClient
 # end of the client class  
 end
 
-def main
-include Utils
+
+# ask the user to provide the server fingerprint, use it later to check the server identity, this method is called offline
+def server_fingerprint_registration()
+  while true
+    puts "please insert the server fingerprint"
+    fingerprint = gets&.strip.force_encoding("UTF-8")
+    puts "please give a name to the server, (only used locally for identification)"
+    puts "maximum size 20 characters and only alphanumerical allowed "
+    server_name = gets&.strip.force_encoding("UTF-8")
+
+    if server_name&.match?(/\A[A-Za-z0-9]{1,20}\z/) && fingerprint&.match?(/\A(?:[a-f0-9]{4}:){15}[a-f0-9]{4}\z/)
+      break
+    else
+      puts "invalid server name or fingerprint"
+      next
+    end
+  end
+
   db = SQLite3::Database.new(DB_FILE)
   db.results_as_hash = true
 
+  hex = fingerprint.delete(":")
+  pk_bytes = [hex].pack("H*")
+
+  raise ArgumentError, "Invalid public key length" unless pk_bytes.bytesize == 32
+
+  db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
+    [fingerprint, server_name, pk_bytes]
+  )
+ensure
+  db&.close
+end
+
+
+# prints on screen the messages on the db
+def show_chat(username)
+  db = SQLite3::Database.new(DB_FILE)
+  db.results_as_hash = true
+  messages = []
+  begin
+    db.transaction do
+      previous_session = db.get_first_row(<<~SQL,
+        SELECT * FROM sessions
+        WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
+        SQL
+        username.force_encoding("UTF-8")
+      )
+      messages = db.execute(<<~SQL,
+        SELECT * FROM messages
+        WHERE sender_id = (SELECT id FROM clients_info WHERE username = ?)
+        ORDER by counter ASC
+        SQL
+        username.force_encoding("UTF-8")
+        )
+    end
+  rescue
+    raise ProtocolError, "Some db operation didn't work out"
+  end
+  puts "#{username}:"
+  messages.each do |msg|
+    puts "msg id counter: #{msg["counter"]}"
+    puts safe_terminal_print(msg["message"])
+    puts "-" * 40
+  end
+rescue
+  db&.close
+end
+
+
+# show the currents users in the clients info db
+def show_users()
+  db = SQLite3::Database.new(DB_FILE)
+  db.results_as_hash = true
+  users = db.execute("SELECT username FROM clients_info")
+
+  users.each do |u| puts safe_terminal_print(u["username"]) end
+
+rescue
+  db&.close
+end
+
+
+# cleans a message from potential injection characters
+def safe_terminal_print(str)
+  str
+    .encode("UTF-8", invalid: :replace, undef: :replace, replace: "�")
+    .gsub(/[\u202A-\u202E\u2066-\u2069]/, "")   # bidi controls
+    .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
+end
+
+
+
+def main
+include Utils
+handshake_info = nil
+nonce_session = nil
+  if !File.exist?(DB_FILE)
+    puts "Please run the client_setup.rb file first"
+    exit
+  end  
+  db = SQLite3::Database.new(DB_FILE)
+  db.results_as_hash = true
   puts "Schat. SecureChat client v1.0"
 
+  server_id = db.execute("SELECT id FROM server_identity")
+  if server_id.empty? == true
+    server_fingerprint_registration()
+  end
+
+  
+  
   loop do
   puts "\n"
   puts "Choose an option:"
@@ -1184,62 +1281,60 @@ include Utils
   puts "8) Show messages received from a given user"
   puts "9) show users to interact with"
   choice = STDIN.gets.strip.to_i
-  client = SecureClient.new("127.0.0.1", 2222)
-
   
+  if choice == 1 || choice == 8 || choice == 9
+    case choice
+    when 1
+      # - used to register a server with a previously shared public key / fingerprint
+      server_fingerprint_registration()
+    when 8
+      loop do
+        puts "Choose a username to interact with"
+        username = STDIN.gets.strip
+        raise ArgumentError, "No input provided" if username.nil?
+
+        if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+          show_chat(username)
+          break
+        end
+      end
+    when 9
+      show_users()
+    end
+    next
+  end
+  
+  unless handshake_info && nonce_session
+    client = SecureClient.new("127.0.0.1", 2222)
+    handshake_info = client.hello_server()
+    nonce_session = Session.new("server", handshake_info[:client_nonce])
+  else
+   puts "go"
+  end
+
+
   case choice
     when 1
       # - used to register a server with a previously shared public key / fingerprint
-      client.server_fingerprint_registration()
+      server_fingerprint_registration()
       
     when 2
       # -inside handshake info there is all the info concerning the connection:
       # - used to ask the server to register our client nickname and voucher
-      handshake_info = client.hello_server()
-      next unless handshake_info
-
-      nonce_session = Session.new("server", handshake_info[:client_nonce])
       client.registration_request(handshake_info, nonce_session)
+
     when 3
-      if handshake_info && nonce_session
-        client.e2ee_keys_share(handshake_info, nonce_session)
-      else
-        handshake_info = client.hello_server()
-        next unless handshake_info
-        
-        nonce_session = Session.new("server", handshake_info[:client_nonce])
-        client.e2ee_keys_share(handshake_info, nonce_session)
-      end
+      client.e2ee_keys_share(handshake_info, nonce_session)
+
     when 4
-      if handshake_info && nonce_session
-        client.e2ee_keys_request(handshake_info, nonce_session)
-      else
-        handshake_info = client.hello_server()
-        next unless handshake_info
-        
-        nonce_session = Session.new("server", handshake_info[:client_nonce])    
-        client.e2ee_keys_request(handshake_info, nonce_session)        
-      end
+      client.e2ee_keys_request(handshake_info, nonce_session)        
+
     when 5
-      if handshake_info && nonce_session
-        client.e2ee_first_message(handshake_info, nonce_session)
-      else
-        handshake_info = client.hello_server()
-        next unless handshake_info
-        
-        nonce_session = Session.new("server", handshake_info[:client_nonce])
-        client.e2ee_first_message(handshake_info, nonce_session)
-      end
+      client.e2ee_first_message(handshake_info, nonce_session)
+
     when 6
-      if handshake_info && nonce_session
-        client.e2ee_ask_messages(handshake_info, nonce_session)
-      else
-        handshake_info = client.hello_server()
-        next unless handshake_info
-        
-        nonce_session = Session.new("server", handshake_info[:client_nonce])
-        client.e2ee_ask_messages(handshake_info, nonce_session)        
-      end
+      client.e2ee_ask_messages(handshake_info, nonce_session)        
+
     when 7
       loop do
         puts "Choose a username to interact with"
@@ -1253,18 +1348,11 @@ include Utils
           SQL
           username
           )
+          
           if username_id
-
-            if handshake_info && nonce_session
-              client.e2ee_continue_chat(username, handshake_info, nonce_session)
-              break
-            else  
-              handshake_info = client.hello_server()
-              nonce_session = Session.new("server", handshake_info[:client_nonce])
-              client.e2ee_continue_chat(username, handshake_info, nonce_session)
-              break
-            end
-            
+            client.e2ee_continue_chat(username, handshake_info, nonce_session)
+            break
+                        
           else
             puts "No existing user with username: #{username}"
             next
@@ -1281,12 +1369,12 @@ include Utils
         raise ArgumentError, "No input provided" if username.nil?
 
         if  username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-          client.show_chat(username)
+          show_chat(username)
           break
         end
       end
     when 9
-      client.show_users()
+      show_users()
     when 10
       puts "secret easter egg, love you all!"
   else

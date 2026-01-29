@@ -2,7 +2,6 @@
 require 'sqlite3'
 require 'rbnacl'
 
-DB_FILE = '/home/kali/schat_db/schat.db'
 CLIENTS_INFO = 'clients_info'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
@@ -14,7 +13,22 @@ PREKEYS = 'one_time_prekeys'
 # fix the db file
 #
 
-db = SQLite3::Database.new(DB_FILE)
+db_path = File.join(Dir.pwd, "schat_db", "schat.db")
+db_dir = File.join(__dir__, "schat_db")
+
+if File.exist?(db_path)
+  puts "A database seems already existing proceeding will delete all the content in the database"
+  puts "press Y to continue and create a new db:"
+  answer = gets.chomp.strip.upcase
+  exit unless answer == "Y"
+end
+
+unless Dir.exist?(db_dir)
+  FileUtils.mkdir_p(db_dir)
+end
+
+
+db = SQLite3::Database.new(db_path)
 
 # contains all the info about a client included the keys for e2ee client to client
 db.execute <<-SQL

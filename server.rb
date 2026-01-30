@@ -73,6 +73,18 @@ class SecureServer
     id = read_exact(message, offset, 1)
     handled_message = message.byteslice(1..)
 
+    unless id == "\x04"
+      db = SQLite3::Database.new(DB_FILE)
+      db.results_as_hash = true
+
+      handshake_pk = handshake_info[:client_pk].to_bytes
+      binding.pry
+      recorded_pk = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?", handshake_pk)
+      if recorded_pk.nil?
+        raise ProtocolError, "The client is not registered and tries to access members only functionalities"
+      end
+    end
+      
     case id
       when "\x04"
       response = registration_request_handler(handled_message, handshake_info)
@@ -94,6 +106,8 @@ class SecureServer
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
   response
+  rescue
+    db&.close  
   end
 
 
@@ -369,38 +383,6 @@ class SecureServer
   end
 
 
-  # used to confirm that the sender is registered and the content hasn't been tampered
-  def identity_verification(message)
-
-    offset = 0
-
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-    
-    public_key_declared = read_exact(message, offset, 32)    
-    offset += 32
-
-    signature_size_header = read_exact(message, offset, 2)
-    signature_size = signature_size_header.unpack1("n")
-    offset += 2
-
-    signautre = read_exact(message, offset, signature_size)
-    offset += signature_size
-
-    message_bit = read_exact(message, offset, 1)
-    identified_message = message.byteslice(offset..)    
-    if message_bit == "\x04"
-      return identified_message
-    else
-    
-    public_key_stored = db.get_first_value("SELECT id FROM clients_info WHERE ")
-    end
-    
-  rescue
-    db&.close
-  end
-  
-  
   # this method is used to handle all the messages received from a single client after the hello client
   def handle_client(handshake_info, sock)
 
@@ -419,8 +401,7 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        identified_message = identity_verification(message)
-        response = handler_caller(identified_message, handshake_info)
+        response = handler_caller(message, handshake_info)
         sender(sock, box, nonce_session, response)
       rescue Timeout::Error
         next

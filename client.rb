@@ -993,32 +993,12 @@ class SecureClient
   end
 
 
-  # adds the identity in order for the server to keep or discard the package
-  def add_identity(message)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
-
-    signing_public_key = db.get_first_value("SELECT signing_public_key FROM user")
-    signature = @host_sk.sign(message)
-    signature_size = [signature.bytesize].pack("n")
-
-    identified_message = signing_public_key + signature_size + signature 
-    identified_message
-  rescue
-    db&.close
-  end
-
-
   # method called to handle the last phase of each method, sends packet and returns the deciphered answer
   def finalizer(nonce_session, handshake_info, message)
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
 
-    identified_message = add_identity(message)
-
-    payload = identified_message + message
-    
-    sender(sock, safe_box, nonce_session, payload)
+    sender(sock, safe_box, nonce_session, message)
     returned_payload = read_blob(sock)
     plain_text = decipher(returned_payload, safe_box)
     plain_text    

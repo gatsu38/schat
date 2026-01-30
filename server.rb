@@ -105,8 +105,11 @@ class SecureServer
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
+
   response
-  rescue
+  rescue => e
+    raise
+  ensure
     db&.close  
   end
 
@@ -150,6 +153,8 @@ class SecureServer
     end
     message = MSG_SERVER_E2EE_DELIVER_MESSAGES + payload
     message
+  rescue => e
+    raise  
   ensure
     db&.close
   end
@@ -196,9 +201,10 @@ class SecureServer
     end
   digest = RbNaCl::Hash.sha256(message)
   digest
-  
-  rescue
-  db&.close  
+  rescue => e
+    raise
+  ensure
+    db&.close  
   end
 
   
@@ -263,7 +269,8 @@ class SecureServer
   end
 
   response_payload  
-
+  rescue => e
+    raise
   ensure
     db&.close
   end
@@ -314,6 +321,8 @@ class SecureServer
     end
     digest = RbNaCl::Hash.sha256(payload)
     digest
+  rescue => e
+    raise
   ensure
     db&.close
   end
@@ -378,6 +387,8 @@ class SecureServer
 
     message = MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE + payload
     message    
+  rescue => e
+    raise    
   ensure
     db&.close  
   end
@@ -449,6 +460,8 @@ class SecureServer
       raise IOError, "Invalid nonce size: #{nonce.bytesize}"
     end
     client_nonce
+  rescue => e
+    raise
   end
 
 
@@ -492,6 +505,8 @@ class SecureServer
     client_eph_pk = client_info[:remote_eph_pk]
     server_box = RbNaCl::Box.new(client_eph_pk, eph_sk)
     {client_nonce: client_nonce, server_nonce: server_nonce, server_box: server_box, client_eph_pk: client_eph_pk, client_pk: client_pk}
+  rescue => e
+    raise      
   end
 
 
@@ -516,13 +531,7 @@ class SecureServer
             handle_client(handshake_info, sock)
             
           rescue StandardError => e
-            begin
-              sock.write "connection failed: #{e.message}"
-            rescue => send_error
-              puts "failed to send error to the client: #{send_error.message}"
-            end
-            puts "Thread exception #{e.class} - #{e.message}"
-            puts e.backtrace.join("\n")
+            e
           ensure
             begin
               sock.close
@@ -532,6 +541,8 @@ class SecureServer
           end
         end
       end
+    rescue => e
+      raise  
     ensure
       self.shutdown(tcp_server) if tcp_server
     end
@@ -613,7 +624,8 @@ class SecureServer
           end
         end
     end
-
+  rescue => e  
+    raise
   ensure
     db&.close
   end
@@ -663,6 +675,7 @@ def generate_vouchers()
   end
   insert_stmt.close
   puts "New vouchers issued"
+  
 
 ensure
   db&.close  

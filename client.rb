@@ -90,6 +90,8 @@ class SecureClient
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
   response
+  rescue => e
+    raise
   end
 
 
@@ -107,6 +109,8 @@ class SecureClient
 
     raw_message = lines.join("\n")
     safe_terminal_print(raw_message)
+  rescue => e
+    raise  
   end
 
 
@@ -144,8 +148,9 @@ class SecureClient
     rescue
       raise ProtocolErro, "Something wrong happened during db operation"
     end
-
-  rescue
+  rescue => e
+    raise
+  ensure
     db&.close
   end
 
@@ -202,8 +207,9 @@ class SecureClient
     rescue
       raise ProtocolError, "Something Wrong happened during db operations"
     end
-
-  rescue
+  rescue => e  
+    raise
+  ensure
     db&.close
   end
 
@@ -314,7 +320,9 @@ class SecureClient
       [next_recv_chain_key, recv_index, previous_session["remote_id"]]
       )
     end  
-  rescue
+  rescue => e
+    raise  
+  ensure
     db&.close  
   end
 
@@ -411,7 +419,9 @@ class SecureClient
         raise ProtocolError, "Something wrong happened during db operation"
       end  
     end  
-  rescue
+  rescue => e
+    raise  
+  ensure
     db&.close
   end
 
@@ -444,7 +454,9 @@ class SecureClient
         e2ee_recieve_established_sessions(remaining_message, username)    
       end
     end
-  rescue
+  rescue => e
+    raise  
+  ensure
     db&.close    
   end
 
@@ -473,6 +485,8 @@ class SecureClient
       offset += message_size
       e2ee_client_message_parser(message, username)    
     end
+  rescue => e
+    raise  
   end
 
 
@@ -511,6 +525,8 @@ class SecureClient
 
     role = {send_dir: send_dir, recv_dir: recv_dir, send_key: send_chain_key, recv_key: recv_chain_key, send_index: send_index, recv_index: recv_index}
     role
+  rescue => e
+    raise  
   end
 
   
@@ -521,7 +537,8 @@ class SecureClient
 
     server_answer = finalizer(nonce_session, handshake_info, message)
     handler_caller(server_answer)
-
+  rescue => e
+    raise  
   end
 
 
@@ -665,7 +682,9 @@ class SecureClient
       raise ProtocolError, "Coulnd't save the user message on the local db"
     end
     show_chat(username)
-  rescue
+  rescue => e
+    raise  
+  ensure
     db&.close
   end
 
@@ -803,7 +822,9 @@ class SecureClient
         raise ProtocolError, "Something went wrong during db operations"
       end
     end
-  rescue
+  rescue => e
+    raise  
+  ensure
     db&.close
   end
 
@@ -840,6 +861,8 @@ class SecureClient
     rescue SQLite3::ConstraintException
       raise ProtocolError, "client already registered"
     end
+  rescue  => e
+    raise   
   ensure
   db&.close
   end
@@ -860,6 +883,8 @@ class SecureClient
       username
     server_answer = finalizer(nonce_session, handshake_info, username_payload)
     handler_caller(server_answer)
+  rescue => e
+    raise  
   end
 
 
@@ -928,7 +953,9 @@ class SecureClient
     digest = RbNaCl::Hash.sha256(payload)
     raise ProtocolError, "Server payload digest mismatch" unless digest == server_return
     puts "Keys shared with success" if digest == server_return    
-  rescue
+  rescue => e
+    raise
+  ensure
     db&.close
   end
 
@@ -956,6 +983,8 @@ class SecureClient
     else
       raise "Unknown server side error response"
     end
+  rescue => e
+    raise  
   end
 
   # ask the user to provide a valid voucher and also recover the nickname from the db,
@@ -988,6 +1017,8 @@ class SecureClient
 
     server_return = finalizer(nonce_session, handshake_info, registration_data)
     handler_caller(server_return)
+  rescue => e
+    raise  
   ensure
     db&.close  
   end
@@ -1002,6 +1033,8 @@ class SecureClient
     returned_payload = read_blob(sock)
     plain_text = decipher(returned_payload, safe_box)
     plain_text    
+  rescue => e
+    raise  
   end
 
 
@@ -1023,7 +1056,8 @@ class SecureClient
     puts "Remote fingerprint and pre-shared fingerprint for #{registered_server_name}:"
     puts "remote:#{pretty_remote_pk}"
     puts "pre   :#{registered_fingerprint}"
-
+  rescue => e
+    raise
   ensure
     db&.close
   end
@@ -1077,6 +1111,8 @@ class SecureClient
     write_all(sock, hello_back_payload)
     client_box = RbNaCl::Box.new(server_eph_pk, eph_sk)
     {client_nonce: client_nonce, server_nonce: server_nonce, client_box: client_box, server_eph_pk: server_eph_pk, server_pk: server_pk, sock: sock}
+  rescue => e
+    raise
   end
 
 
@@ -1108,6 +1144,8 @@ class SecureClient
     db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
       [fingerprint, server_name, pk_bytes]
     )
+  rescue => e
+    raise  
   ensure
     db&.close
   end
@@ -1130,6 +1168,8 @@ class SecureClient
 
     @host_sk = RbNaCl::Signatures::Ed25519::SigningKey.new(host_sk_bytes)
     @host_pk = RbNaCl::Signatures::Ed25519::VerifyKey.new(host_pk_bytes)
+  rescue => e
+    raise  
   ensure
     db&.close
   end
@@ -1166,6 +1206,8 @@ def server_fingerprint_registration()
   db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
     [fingerprint, server_name, pk_bytes]
   )
+rescue => e
+  raise  
 ensure
   db&.close
 end
@@ -1201,7 +1243,9 @@ def show_chat(username)
     puts safe_terminal_print(msg["message"])
     puts "-" * 40
   end
-rescue
+rescue => e
+  raise  
+ensure
   db&.close
 end
 
@@ -1213,8 +1257,9 @@ def show_users()
   users = db.execute("SELECT username FROM clients_info")
 
   users.each do |u| puts safe_terminal_print(u["username"]) end
-
-rescue
+rescue => e  
+  raise
+ensure
   db&.close
 end
 
@@ -1225,6 +1270,8 @@ def safe_terminal_print(str)
     .encode("UTF-8", invalid: :replace, undef: :replace, replace: "�")
     .gsub(/[\u202A-\u202E\u2066-\u2069]/, "")   # bidi controls
     .gsub(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/, "")
+rescue => e
+  raise
 end
 
 
@@ -1364,7 +1411,7 @@ nonce_session = nil
 
   # this end is for the loop
   end
-rescue
+ensure
   db&.close  
 end
   

@@ -81,7 +81,6 @@ class SecureServer
       db = open_db(DB_FILE)
 
       handshake_pk = handshake_info[:client_pk].to_bytes
-      binding.pry
       recorded_pk = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?", handshake_pk)
       if recorded_pk.nil?
         raise ProtocolError, "The client is not registered and tries to access members only functionalities"
@@ -595,7 +594,6 @@ class SecureServer
     @pool = Concurrent::FixedThreadPool.new(20)
 
     db = open_db(DB_FILE)
-
     host_row = db.get_first_row("SELECT private_key, public_key FROM host_keys")
 
     raise ProtocolError, "No host key found" unless host_row
@@ -612,16 +610,16 @@ class SecureServer
     puts "Server fingerprint: #{pretty}"
 
     puts "Do you want new vouchers? Y/N"
-    answer_one = gets.chomp.strip.upcase
+    answer_one = STDIN.gets.chomp.strip.upcase
     if answer_one == 'Y'
       generate_vouchers()
-      puts "Do you want to see the available vouchers? Y/N"
-      answer_two = gets.chomp.strip.upcase
-        if answer_two == 'Y'
-          db.execute("SELECT voucher FROM vouchers WHERE used_at IS NULL") do |row|
-            puts row[0]
-          end
-        end
+    end
+    puts "Do you want to see the available vouchers? Y/N"
+    answer_two = STDIN.gets.chomp.strip.upcase
+    if answer_two == 'Y'
+      db.execute("SELECT voucher FROM vouchers WHERE used_at IS NULL") do |row|
+        puts row["voucher"]
+      end
     end
   rescue => e  
     raise

@@ -2,6 +2,8 @@
 require 'sqlite3'
 require 'rbnacl'
 require 'io/console'
+require 'fileutils'
+
 CLIENTS_INFO = 'clients_info'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
@@ -13,6 +15,7 @@ PREKEYS = 'one_time_prekeys'
 # fix the db file
 #
 
+begin
 db_path = File.join(Dir.pwd, "schat_db", "schat1.db")
 db_dir = File.join(__dir__, "schat_db")
 
@@ -158,28 +161,14 @@ db.execute <<-SQL
 SQL
 
 
-    
-
-puts "table #{HOST_KEYS} ready"
-puts "table #{EPH_HOST_KEYS} ready"
-
 host_sk = RbNaCl::Signatures::Ed25519::SigningKey.generate
 host_pk = host_sk.verify_key
 
 # insert private and public key inside the database
 db.execute("INSERT INTO #{HOST_KEYS} (private_key, public_key) VALUES (?, ?)", [host_sk.to_bytes, host_pk.to_bytes])
 
-# protect database with user password
-# !!!!! ADD EXTRA PROTECTION IN THIS PHASE????
-# !!!!! ADD PASSWORD MINIMUM SECURITY
-#puts "enter password to protect the database"
-#user_password = STDIN.noecho(&:gets).chomp
-
-# !!!!! ADD PROTECTION
-#password_key = Digest::SHA256.digest(user_password)
-
-#tpm_key = tpm_function
-
-#master_key_bytes = password_key.bytes.zip(tpm_key.bytes).map { |a,b| (a ^ b).chr }.join
-#mater_key = RbNaCl::SecretBox.new(master_key_bytes)
+rescue => e
+  raise 
+ensure
 db.close
+end

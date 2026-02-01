@@ -29,6 +29,11 @@ include HKDF
 # main method
   # main()
 
+if ARGV.length != 2
+  puts "Usage: ruby client.rb <server_ip> <port>"
+  exit 1
+end
+
 puts "Please provide the db password"
 MASTER_KEY = prompt_password("DB password: ")
 DB_FILE = File.join(Dir.pwd, "schat_db", "client1.db")
@@ -1110,40 +1115,6 @@ class SecureClient
   end
 
 
-  # ask the user to provide the server fingerprint, use it later to check the server identity, this method is called offline
-  def server_fingerprint_registration()
-    while true
-      puts "please insert the server fingerprint"
-      fingerprint = gets&.strip.force_encoding("UTF-8")
-      puts "please give a name to the server, (only used locally for identification)"
-      puts "maximum size 20 characters and only alphanumerical allowed "
-      server_name = gets&.strip.force_encoding("UTF-8")
-
-      if server_name&.match?(/\A[A-Za-z0-9]{1,20}\z/) && fingerprint&.match?(/\A(?:[a-f0-9]{4}:){15}[a-f0-9]{4}\z/)
-        break
-      else
-        puts "invalid server name or fingerprint"
-        next
-      end
-    end
-
-    db = open_db(DB_FILE)
-
-    hex = fingerprint.delete(":")
-    pk_bytes = [hex].pack("H*")
-
-    raise ArgumentError, "Invalid public key length" unless pk_bytes.bytesize == 32
-
-    db.execute("INSERT INTO server_identity (fingerprint, server_name, public_key) VALUES (?, ?, ?)",
-      [fingerprint, server_name, pk_bytes]
-    )
-  rescue => e
-    raise  
-  ensure
-    db&.close
-  end
-
-
   # the initialization method
   def initialize(host, port)
     @host, @port = host, port
@@ -1174,10 +1145,10 @@ end
 def server_fingerprint_registration()
   while true
     puts "please insert the server fingerprint"
-    fingerprint = gets&.strip.force_encoding("UTF-8")
+    fingerprint = STDIN.gets&.strip.force_encoding("UTF-8")
     puts "please give a name to the server, (only used locally for identification)"
     puts "maximum size 20 characters and only alphanumerical allowed "
-    server_name = gets&.strip.force_encoding("UTF-8")
+    server_name = STDIN.gets&.strip.force_encoding("UTF-8")
 
     if server_name&.match?(/\A[A-Za-z0-9]{1,20}\z/) && fingerprint&.match?(/\A(?:[a-f0-9]{4}:){15}[a-f0-9]{4}\z/)
       break
@@ -1358,7 +1329,8 @@ nonce_session = nil
   end
   
   unless handshake_info && nonce_session
-    client = SecureClient.new("127.0.0.1", 2222)
+  binding.pry
+    client = SecureClient.new(ARGV[0], ARGV[1].to_i)
     handshake_info = client.hello_server()
     nonce_session = Session.new("server", handshake_info[:client_nonce])
   end

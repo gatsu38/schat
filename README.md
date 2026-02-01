@@ -61,9 +61,11 @@ During the setup minimal user input is required
 
 
 3) USAGE:
-Server: The server will print it's fingerprint (the signing public key).
-  After that the user will be prompt to print a number of vouchers.
+Server: The server will print it's fingerprint (the signing public key) when switching it on.
+  After that the user will be asked to print vouchers.
   It'll be required for clients to know both the fingerprint and have a valid voucher in order to communicate with the server.
+  No voucher: no access to the server functionalities
+  !!!! The number of concurrent threads is fixed to 20 There is no DDOS protection !!!!
 
 Client: First it'll be requested to give a valide server fingerprint, with format (ab11:f43d:9983...:bb32).
   Register with the server, a valid voucher is required.

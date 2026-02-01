@@ -4,6 +4,7 @@ require 'rbnacl'
 require 'pry'
 require 'pry-byebug'
 require 'fileutils'
+require "io/console"
 
 USER_TABLE = 'user'
 SESSIONS = 'sessions'
@@ -20,7 +21,7 @@ MESSAGES = 'messages'
 
 begin
 
-  db_path = File.join(Dir.pwd, "schat_db", "client.db")
+  db_path = File.join(Dir.pwd, "schat_db", "client1.db")
   db_dir = File.join(__dir__, "schat_db")
 
   if File.exist?(db_path)
@@ -33,10 +34,29 @@ begin
   unless Dir.exist?(db_dir)
     FileUtils.mkdir_p(db_dir)
   end
+
   
+  def prompt_password(prompt)
+    print prompt
+    STDIN.noecho(&:gets).chomp.tap { puts }
+  end
+
+  password = prompt_password("Create DB password: ")
+  confirm  = prompt_password("Confirm password: ")
+
+
+  abort("Passwords do not match") if password != confirm
   
   db = SQLite3::Database.new(db_path)
+  hex = password.unpack1("H*")
+  db.execute("PRAGMA key = \"x'#{hex}'\";")  
 
+  begin
+    db.execute("SELECT count(*) FROM sqlite_master;")
+  rescue SQLite3::Exception
+    abort("Invalid password or corrupted DB")
+  end
+    
   # contains the messages sent by other users
   db.execute <<-SQL
     CREATE TABLE IF NOT EXISTS #{MESSAGES} (

@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 require 'sqlite3'
 require 'rbnacl'
-
+require 'io/console'
 CLIENTS_INFO = 'clients_info'
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
@@ -13,8 +13,9 @@ PREKEYS = 'one_time_prekeys'
 # fix the db file
 #
 
-db_path = File.join(Dir.pwd, "schat_db", "schat.db")
+db_path = File.join(Dir.pwd, "schat_db", "schat1.db")
 db_dir = File.join(__dir__, "schat_db")
+
 
 if File.exist?(db_path)
   puts "A database seems already existing proceeding will delete all the content in the database"
@@ -27,8 +28,29 @@ unless Dir.exist?(db_dir)
   FileUtils.mkdir_p(db_dir)
 end
 
+def prompt_password(prompt)
+  print prompt
+  STDIN.noecho(&:gets).chomp.tap { puts }
+end
+
+password = prompt_password("Create DB password: ")
+confirm  = prompt_password("Confirm password: ")
+
+
+abort("Passwords do not match") if password != confirm
 
 db = SQLite3::Database.new(db_path)
+hex = password.unpack1("H*")
+db.execute("PRAGMA key = \"x'#{hex}'\";")
+
+
+begin
+  db.execute("SELECT count(*) FROM sqlite_master;")
+rescue SQLite3::Exception
+  abort("Invalid password or corrupted DB")
+end
+
+
 
 # contains all the info about a client included the keys for e2ee client to client
 db.execute <<-SQL

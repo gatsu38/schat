@@ -6,6 +6,11 @@ require 'pry'
 require 'pry-byebug'
 require 'sqlite3'
 
+include Utils
+include Builders
+include HKDF
+
+
 # LIST OF FUNCTIONS
 # the first method called to send a message to another client: computes the shared secret root key
   # e2ee_first_message
@@ -24,7 +29,9 @@ require 'sqlite3'
 # main method
   # main()
 
-DB_FILE = File.join(Dir.pwd, "schat_db", "client.db")
+puts "Please provide the db password"
+MASTER_KEY = prompt_password("DB password: ")
+DB_FILE = File.join(Dir.pwd, "schat_db", "client1.db")
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -46,11 +53,6 @@ MSG_CLI_TO_CLI_SUBSEQUENT_MESSAGE = "\x10"
 class ProtocolError < StandardError; end
 
 class SecureClient
-
-  include Utils
-  include Builders
-  include HKDF
-
 
   def connect
     sock = TCPSocket.new(@host, @port)
@@ -117,8 +119,7 @@ class SecureClient
   # in case a message arrives that has an index higher than the expected one, we store 
   # for later reference the keys to decipher the old messages
   def store_skipped_keys(session_id, key, counter, nonce)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     begin
       keys_blob = db.get_first_value(<<~SQL,
@@ -158,8 +159,8 @@ class SecureClient
   # in case we obtain a message that was supposed to arrive earlier, we still can decipher it
   # thanks to the previously saved message keys
   def decipher_old_messages(counter, session_id, ciphertext, remote_id, recv_index)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
+    
     begin
       keys_blob = db.get_first_value(<<~SQL,
         SELECT skipped_keys
@@ -238,8 +239,7 @@ class SecureClient
     
     ciphertext = read_exact(remaining_message, offset, ciphertext_size)
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     begin 
       previous_session = db.get_first_row(<<~SQL,
@@ -329,8 +329,7 @@ class SecureClient
   
   # continue a previously started chat (send a message)
   def e2ee_continue_chat(username, handshake_info, nonce_session)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     begin
       previous_session = db.get_first_row(<<~SQL,
@@ -429,8 +428,7 @@ class SecureClient
   # parses a header flag, so far tells if there is already an e2ee session among the peers
   # tells the peer that there actually already is such a session
   def e2ee_client_message_parser(message, username)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     flag = read_exact(message, 0, 1)
     remaining_message = message.byteslice(1..)
@@ -594,8 +592,8 @@ class SecureClient
 
     ciphertext = read_exact(message, offset, ciphertext_size)
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
+
     begin
       keys = db.get_first_row(<<-SQL,
         SELECT pre.private_signed_prekey AS signed, 
@@ -694,8 +692,7 @@ class SecureClient
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
     raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     existing_session_id = db.get_first_value(<<~SQL,
       SELECT id FROM sessions WHERE (SELECT id FROM clients_info WHERE username = ?)
@@ -840,8 +837,7 @@ class SecureClient
     one_time_keys = e_material[:otpk]
     otp_amount = e_material[:otp_amount]
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     raise ProtocolError, "Too many one time keys" unless otp_amount == 1 && one_time_keys.bytesize == 33
     
@@ -890,8 +886,7 @@ class SecureClient
 
   # the hello method that asks the server to save the keys and signature, later used by other clients for e2ee
   def e2ee_keys_share(handshake_info, nonce_session)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true 
+    db = open_db(DB_FILE)
 
     signed_sk = RbNaCl::PrivateKey.generate
     signed_pk = signed_sk.public_key
@@ -989,8 +984,7 @@ class SecureClient
 
   # ask the user to provide a valid voucher and also recover the nickname from the db,
   def registration_request(handshake_info, nonce_session)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     # obtain the nickname from the db
     nickname = db.get_first_value(<<-SQL)
@@ -1040,8 +1034,8 @@ class SecureClient
 
   # called during hello_client to check if the public key matches the registered server
   def server_fingerprint_check(remote_pk)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
+
     remote_pk_bytes = remote_pk.to_bytes
 
     # transform the public key into a human readable fingerprint
@@ -1133,8 +1127,7 @@ class SecureClient
       end
     end
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     hex = fingerprint.delete(":")
     pk_bytes = [hex].pack("H*")
@@ -1155,8 +1148,7 @@ class SecureClient
   def initialize(host, port)
     @host, @port = host, port
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     host_row = db.get_first_row("SELECT signing_private_key, signing_public_key FROM user")
 
@@ -1195,8 +1187,7 @@ def server_fingerprint_registration()
     end
   end
 
-  db = SQLite3::Database.new(DB_FILE)
-  db.results_as_hash = true
+  db = open_db(DB_FILE)
 
   hex = fingerprint.delete(":")
   pk_bytes = [hex].pack("H*")
@@ -1215,8 +1206,8 @@ end
 
 # prints on screen the messages on the db
 def show_chat(username)
-  db = SQLite3::Database.new(DB_FILE)
-  db.results_as_hash = true
+  db = open_db(DB_FILE)
+
   messages = []
   begin
     db.transaction do
@@ -1252,8 +1243,8 @@ end
 
 # show the currents users in the clients info db
 def show_users()
-  db = SQLite3::Database.new(DB_FILE)
-  db.results_as_hash = true
+  db = open_db(DB_FILE)
+
   users = db.execute("SELECT username FROM clients_info")
 
   users.each do |u| puts safe_terminal_print(u["username"]) end
@@ -1277,15 +1268,17 @@ end
 
 
 def main
-include Utils
+
 handshake_info = nil
 nonce_session = nil
   if !File.exist?(DB_FILE)
     puts "Please run the client_setup.rb file first"
     exit
   end  
-  db = SQLite3::Database.new(DB_FILE)
-  db.results_as_hash = true
+
+  puts "Please provide the db password"
+  
+  db = open_db(DB_FILE)
   puts "Schat. SecureChat client v1.0"
 
   server_id = db.execute("SELECT id FROM server_identity")
@@ -1335,8 +1328,6 @@ nonce_session = nil
     client = SecureClient.new("127.0.0.1", 2222)
     handshake_info = client.hello_server()
     nonce_session = Session.new("server", handshake_info[:client_nonce])
-  else
-   puts "go"
   end
 
 

@@ -35,6 +35,7 @@
 
 require 'timeout'
 require 'rbnacl'
+require 'io/console'
 module Utils
 
 MAX_BLOB_SIZE = 16 * 1024 * 1024
@@ -82,6 +83,22 @@ MAX_FIELD_SIZE = 1024
     end
   # end of session class
   end
+
+
+  # used to properly handle user input for password
+  def prompt_password(prompt)
+    print prompt
+    STDIN.noecho(&:gets).chomp.tap { puts }
+  end
+
+  def open_db(db_path)
+    db = SQLite3::Database.new(db_path)
+    hex = MASTER_KEY.unpack1("H*")
+    db.execute("PRAGMA key = \"x'#{hex}'\";")
+    db.results_as_hash = true
+    db
+  end
+
 
   # helper wrapper to obtain the shared secret from two keys
   def dh(private_key, public_key)

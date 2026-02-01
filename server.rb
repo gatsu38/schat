@@ -10,6 +10,10 @@ require 'pry'
 require 'pry-byebug'
 require 'sqlite3'
 
+include Utils
+include Builders
+
+
 # METHODS
 # receive_hello
   # used to receive the hello message from client containing the client nonce
@@ -29,7 +33,9 @@ require 'sqlite3'
   # safe database shutdown
 # generate_vouchers
   # create the vouchers
-DB_FILE = File.join(Dir.pwd, "schat_db", "schat.db")
+puts "Please provide the db password"
+MASTER_KEY = prompt_password("DB password: ")
+DB_FILE = File.join(Dir.pwd, "schat_db", "schat1.db")
 HOST_KEYS = 'host_keys'
 EPH_HOST_KEYS = 'host_ephemeral_keys'
 CLIENTS_INFO = 'clients_pub_keys'
@@ -64,8 +70,6 @@ end
 
 # === Server ===
 class SecureServer
-  include Utils
-  include Builders
 
   # reads the message ID and calls the appropriate message handler
   def handler_caller(message, handshake_info = nil)
@@ -74,8 +78,7 @@ class SecureServer
     handled_message = message.byteslice(1..)
 
     unless id == "\x04"
-      db = SQLite3::Database.new(DB_FILE)
-      db.results_as_hash = true
+      db = open_db(DB_FILE)
 
       handshake_pk = handshake_info[:client_pk].to_bytes
       binding.pry
@@ -117,8 +120,7 @@ class SecureServer
 
   # forward messages to the requester
   def e2ee_message_harvester(message, handshake_info)
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
@@ -183,8 +185,8 @@ class SecureServer
 
     sender_signing_pk = handshake_info[:client_pk].to_bytes
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
+
     begin
       db.transaction do
         recipient_id = db.get_first_value("SELECT id FROM clients_info WHERE username = ?", recipient)
@@ -232,8 +234,7 @@ class SecureServer
 
       client_voucher = read_exact(message, offset, 30) 
       encoded_voucher = client_voucher.force_encoding("UTF-8")
-      db = SQLite3::Database.new(DB_FILE)
-      db.results_as_hash = true
+      db = open_db(DB_FILE)
 
       db.transaction do
         row_voucher = db.get_first_row(
@@ -287,8 +288,8 @@ class SecureServer
     one_time_keys = e_material[:otpk]
     otp_amount = e_material[:otp_amount]
     
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
+
     begin
       client_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?",
         [signing_pub_key]
@@ -343,8 +344,7 @@ class SecureServer
       raise ProtocolError, "The provided username does not fit the username criteria" 
     end
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     username_row = db.get_first_row("SELECT * FROM clients_info WHERE username = ?",
       [username]
@@ -594,8 +594,7 @@ class SecureServer
     @port = port
     @pool = Concurrent::FixedThreadPool.new(20)
 
-    db = SQLite3::Database.new(DB_FILE)
-    db.results_as_hash = true
+    db = open_db(DB_FILE)
 
     host_row = db.get_first_row("SELECT private_key, public_key FROM host_keys")
 
@@ -647,8 +646,7 @@ def generate_vouchers()
     puts "Number of vouchers to generate too high"
   end
 
-  db = SQLite3::Database.new(DB_FILE)
-  db.results_as_hash = true
+  db = open_db(DB_FILE)
   
   unused_count = db.get_first_value(
   <<~SQL

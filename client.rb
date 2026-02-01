@@ -1,4 +1,4 @@
-require 'socket'
+#require 'socket'
 require 'rbnacl'
 require_relative 'utils'
 require_relative 'builders'
@@ -1266,6 +1266,36 @@ rescue => e
 end
 
 
+# to handle the client shutdown
+def shutdown(handshake_info, db, exit_code: 0)
+  puts "\nShutting down…"
+
+  unless handshake_info.nil?
+    socket = handshake_info[:sock]
+    begin
+      socket.close unless socket.closed?
+    rescue => e
+      warn "Socket close failed: #{e.message}"
+    end
+  end
+
+  # Close database
+  unless db.nil?
+    begin
+      db.execute("PRAGMA cipher_memory_security = ON")
+      db.close
+    rescue => e
+      warn "DB close failed: #{e.message}"
+    end
+  end
+
+  # Best-effort memory cleanup
+  GC.start
+
+  exit(exit_code)
+end
+
+
 
 def main
 
@@ -1300,9 +1330,10 @@ nonce_session = nil
   puts "7) Continue a previosly started chat"
   puts "8) Show messages received from a given user"
   puts "9) show users to interact with"
+  puts "11) to close"
   choice = STDIN.gets.strip.to_i
   
-  if choice == 1 || choice == 8 || choice == 9
+  if choice == 1 || choice == 8 || choice == 9 || choice == 11
     case choice
     when 1
       # - used to register a server with a previously shared public key / fingerprint
@@ -1320,6 +1351,8 @@ nonce_session = nil
       end
     when 9
       show_users()
+    when 11
+      shutdown(handshake_info, db)
     end
     next
   end
@@ -1395,6 +1428,8 @@ nonce_session = nil
       show_users()
     when 10
       puts "secret easter egg, love you all!"
+    when 11
+      shutdown(handshake_info, db)
   else
     puts "non existing choice"
     next

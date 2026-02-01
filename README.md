@@ -74,5 +74,11 @@ Client: First it'll be requested to give a valide server fingerprint, with forma
 
 4) CONFIGURATION:
 The databases are in the schat_db folder, no configuration is actually required 
+!!!!!!
+Make sure to have ruby's sqlite3 gem installed with sqlcipher:
+gem install sqlite3 -- --with-sqlcipher
+if sqlite3 gem is already installed remove it first and then reinstall with sqlcipher
+otherwise your messages will be saved in plain text on the db.
+!!!!!!
 
 5) LICENSE: MIT

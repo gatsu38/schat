@@ -167,6 +167,8 @@ host_pk = host_sk.verify_key
 # insert private and public key inside the database
 db.execute("INSERT INTO #{HOST_KEYS} (private_key, public_key) VALUES (?, ?)", [host_sk.to_bytes, host_pk.to_bytes])
 
+puts "Server database created"
+
 rescue => e
   raise 
 ensure

@@ -1,4 +1,4 @@
-#require 'socket'
+require 'socket'
 require 'rbnacl'
 require_relative 'utils'
 require_relative 'builders'

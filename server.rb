@@ -510,10 +510,10 @@ class SecureServer
 
 
   # spawns a new thread for each new client connection
-  def run
+  def run(ip)
     begin
-    tcp_server = TCPServer.new(@port)
-    puts "Server listening on port #{@port}"
+    tcp_server = TCPServer.new(ip, @port)
+    puts "Server listening on #{ip} #{@port}"
 
       loop do
         # client is the tcp connection 
@@ -680,5 +680,6 @@ end
 
 
 # non necessariamente instanziabile
-SecureServer.new(2222).run
+ip = ARGV[0]
+SecureServer.new(ARGV[1].to_i).run(ip)
 

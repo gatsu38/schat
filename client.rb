@@ -59,6 +59,7 @@ class ProtocolError < StandardError; end
 
 class SecureClient
 
+  # helper function to establish a tcp connection
   def connect
     sock = TCPSocket.new(@host, @port)
     sock
@@ -97,12 +98,14 @@ class SecureClient
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
   response
+
   rescue => e
     raise
   end
 
 
   # obtain user input for a message, accepts multiple lines
+  # allows for multi line messages
   def user_message
     puts "Enter your message. Finish with an empty line or Ctrl-D:"
 
@@ -120,7 +123,7 @@ class SecureClient
     raise  
   end
 
-
+  # Used in case e2ee messages arrive out of orded
   # in case a message arrives that has an index higher than the expected one, we store 
   # for later reference the keys to decipher the old messages
   def store_skipped_keys(session_id, key, counter, nonce)
@@ -165,7 +168,7 @@ class SecureClient
   # thanks to the previously saved message keys
   def decipher_old_messages(counter, session_id, ciphertext, remote_id, recv_index)
     db = open_db(DB_FILE)
-    
+
     begin
       keys_blob = db.get_first_value(<<~SQL,
         SELECT skipped_keys
@@ -220,9 +223,8 @@ class SecureClient
   end
 
 
-  # recieve messages for an already established session
-  def e2ee_recieve_established_sessions(remaining_message, username)
-
+  # receive messages for an already established session
+  def e2ee_receive_established_sessions(remaining_message, username)
     offset = 0
     
     nonce_size_header = read_exact(remaining_message, offset, 2)
@@ -279,8 +281,6 @@ class SecureClient
     recv_chain_key = previous_session["#{recv_dir}_chain_key"]
     recv_index = previous_session["#{recv_dir}_index"]
 
-    show_chat(username)
-    puts "New messages:"
 
     if counter > recv_index
       difference = counter - recv_index
@@ -298,6 +298,8 @@ class SecureClient
       end
 
     elsif counter < recv_index
+      difference = recv_index - counter
+      
       decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
     end
 
@@ -332,7 +334,7 @@ class SecureClient
   end
 
   
-  # continue a previously started chat (send a message)
+  # continue a previously started chat (send a message) to a known client
   def e2ee_continue_chat(username, handshake_info, nonce_session)
     db = open_db(DB_FILE)
 
@@ -445,16 +447,16 @@ class SecureClient
       )
     case flag
     when "\x0f"
-      if session == nil
+      #if session == nil
         e2ee_peer_first_message(remaining_message, username)
-      else
-        raise ProtocolError, "There is already an active session among the users, but the remote asks for a fresh session"
-      end  
+      #else
+      #  raise ProtocolError, "There is already an active session among the users, but the remote asks for a fresh session"
+      #end  
     when "\x10"
       if session == nil
         raise ProtocolError, "There is no active session among the users, but the remot user asks to continue a pre established one"
       else
-        e2ee_recieve_established_sessions(remaining_message, username)    
+        e2ee_receive_established_sessions(remaining_message, username)    
       end
     end
   rescue => e
@@ -492,7 +494,7 @@ class SecureClient
     raise  
   end
 
-
+  # this method is a helper function that allows the 2 clients to gu
   def keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
 
     a_to_b_chain_key = HKDF.expand(root_key, "CHAIN-A-TO-B".b, 32)
@@ -535,7 +537,6 @@ class SecureClient
   
   # ask the server if there's messages in the queue and fetch them
   def e2ee_ask_messages(handshake_info, nonce_session)
-
     message = MSG_CLIENT_E2EE_ASK_MESSAGES
 
     server_answer = finalizer(nonce_session, handshake_info, message)
@@ -546,7 +547,11 @@ class SecureClient
 
 
   # receive the first message from a different client
+  # all the material sent from the peer will be used to create a new e2ee session
+  # and to decipher the first message
   def e2ee_peer_first_message(message, username)
+    db = open_db(DB_FILE)
+
     offset = 0
     remote_id_pub_key = read_exact(message, offset, 32)
     offset += 32
@@ -559,6 +564,12 @@ class SecureClient
 
     local_ot_pub_key_used = read_exact(message, offset, 32)
     offset += 32
+
+    otk_used = db.get_first_value("SELECT id FROM one_time_prekeys WHERE one_time_public_key = ?", local_ot_pub_key_used)
+
+    if otk_used.nil?
+      return
+    end
 
     local_signed_pub_key_used = read_exact(message, offset, 32)
     offset += 32
@@ -597,8 +608,6 @@ class SecureClient
 
     ciphertext = read_exact(message, offset, ciphertext_size)
 
-    db = open_db(DB_FILE)
-
     begin
       keys = db.get_first_row(<<-SQL,
         SELECT pre.private_signed_prekey AS signed, 
@@ -614,7 +623,7 @@ class SecureClient
       [local_signed_pub_key_used, local_ot_pub_key_used]
       )
     rescue
-      raise ProtocolError, "Something went wrong during db interaction"
+      raise "Something went wrong during db interaction"
     end
     raise "Missing keys" unless keys
 
@@ -623,6 +632,7 @@ class SecureClient
     local_id_pub_key = keys["id_pub"]
     local_ot_pri_key = keys["ot"]
 
+    # derive the same root key
     dh1 = dh(local_signed_pri_key, remote_id_pub_key)
     dh2 = dh(local_id_pri_key, remote_eph_pub_key)
     dh3 = dh(local_signed_pri_key, remote_eph_pub_key)
@@ -631,6 +641,7 @@ class SecureClient
     combined_secrets = dh1+dh2+dh3+dh4
     root_key = HKDF.extract(combined_secrets)
 
+    # properly assign the chain key and the key index
     elements = keys_and_index(keys, root_key, local_id_pub_key, remote_id_pub_key)
     send_dir = elements[:send_dir]
     recv_dir = elements[:recv_dir]
@@ -646,6 +657,8 @@ class SecureClient
     recv_index += 1
     send_index = 0
     plain_text = secret_root_box.open(nonce, ciphertext)
+
+    # updates the db with the received message and the e2ee session material
     begin
       db.transaction do
         local_id = db.get_first_value("SELECT id FROM user")
@@ -684,7 +697,6 @@ class SecureClient
     rescue
       raise ProtocolError, "Coulnd't save the user message on the local db"
     end
-    show_chat(username)
   rescue => e
     raise  
   ensure
@@ -692,13 +704,17 @@ class SecureClient
   end
 
 
-  # the first method called to send a message to another client: derives the root key
+  # the first method called to send a message to another client:
+  # a message will be ciphered and will be sent with all the material needed to decipher it
+  # and to establish a e2ee channel for long term communication
   def e2ee_first_message(handshake_info, nonce_session)
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip
     raise ArgumentError, "Wrong username format" unless username.match?(/\A[A-Za-z0-9]{5,20}\z/)
+
     db = open_db(DB_FILE)
 
+    # verifies that a session doesn't already exist
     existing_session_id = db.get_first_value(<<~SQL,
       SELECT id FROM sessions WHERE (SELECT id FROM clients_info WHERE username = ?)
     SQL
@@ -711,6 +727,7 @@ class SecureClient
       return 0
     end
 
+    # generate the ephemeral key
     ephemeral_sk = RbNaCl::PrivateKey.generate
     ephemeral_pk = ephemeral_sk.public_key
 
@@ -719,6 +736,7 @@ class SecureClient
        
     begin
 
+      # obtain all the material needed for the x3dh
       client_info = db.get_first_row("SELECT * FROM clients_info WHERE username = ?", [username])      
       raise "No username found with name #{username}" unless client_info
       remote_signing_pub_key = client_info["signing_public_key"]
@@ -732,6 +750,7 @@ class SecureClient
       local_identity_pub_key = keys["pub"]
       local_identity_pri_key = keys["priv"]
 
+      # obtain a root key
       dh1 = dh(local_identity_pri_key, remote_signed_pub_key)
       dh2 = dh(ephemeral_sk_bytes, remote_id_pub_key)
       dh3 = dh(ephemeral_sk_bytes, remote_signed_pub_key)
@@ -740,6 +759,7 @@ class SecureClient
       combined_secrets = dh1+dh2+dh3+dh4
       root_key = HKDF.extract(combined_secrets)
 
+      # assigns the correct values to the correct peer for the 2 key chains and chain indexes
       elements = keys_and_index(keys, root_key, local_identity_pub_key, remote_id_pub_key)
 
       send_dir = elements[:send_dir]
@@ -748,6 +768,8 @@ class SecureClient
       recv_chain_key = elements[:recv_key]
       send_index = elements[:send_index]
       recv_index = elements[:recv_index]
+
+      # create a new message key to encrypt the data and a new chain key to save on the db
       message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
       secret_root_box = RbNaCl::SecretBox.new(message_key)
       next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
@@ -755,6 +777,7 @@ class SecureClient
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
 
+    # encrypt the message
     nonce = RbNaCl::Random.random_bytes(secret_root_box.nonce_bytes)
     nonce_size = [nonce.bytesize].pack("n")
     message = user_message()
@@ -762,11 +785,14 @@ class SecureClient
     ciphertext = secret_root_box.box(nonce, message)
     ciphertext_size = [ciphertext.bytesize].pack("N")
 
+    # create a transcript to prove the authenticity of the ephemeraly key
     transcript = local_identity_pub_key + ephemeral_pk_bytes
     
     signature = @host_sk.sign(transcript)
     signature_size = [signature.bytesize].pack("n")
     counter = [send_index].pack("N")
+
+    # the package to be sent to the client
     payload =
       MSG_CLI_TO_CLI_FIRST_MESSAGE +
       local_identity_pub_key +
@@ -787,6 +813,7 @@ class SecureClient
     username_size = [username.bytesize].pack("C")
     payload_size = [payload.bytesize].pack("N")
 
+    # wrapper around the client message: this is for the server to handle the message correctly
     message = 
       MSG_CLIENT_E2EE_FIRST_MESSAGE +
       username_size +
@@ -796,9 +823,11 @@ class SecureClient
 
     server_answer = finalizer(nonce_session, handshake_info, message)
 
+    # verifies everything arrived with success
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
 
+    # insert into the db the e2ee session material
     if server_answer == digest
     puts "Message properly uploaded"
     
@@ -832,6 +861,7 @@ class SecureClient
 
   
   # wrapper around the receiver for the e2ee material 
+  # used to assign the material to the variables and insert them into the database
   def e2ee_client_share_receiver_wrapper(payload, handshake_info)
     e_material = e2ee_keys_share_receiver(payload, handshake_info)
     username = e_material[:username].force_encoding("UTF-8")
@@ -860,8 +890,9 @@ class SecureClient
         )
       end
     rescue SQLite3::ConstraintException
-      raise ProtocolError, "client already registered"
+      puts "client already registered"
     end
+  puts "key material successfully obtained"  
   rescue  => e
     raise   
   ensure
@@ -869,7 +900,8 @@ class SecureClient
   end
 
 
-  # method used to establish a connection with a given user
+  # asks the server to provide the necessary material to establish a e2ee with another client:
+  # identity key, signing key, signature, signed prekey, one time key
   def e2ee_keys_request(handshake_info, nonce_session)
     puts "Please provide the username you wish to interact with"
     username = STDIN.gets.strip    
@@ -889,7 +921,8 @@ class SecureClient
   end
 
 
-  # the hello method that asks the server to save the keys and signature, later used by other clients for e2ee
+  # shares with the server the keys to allow other clients to establish a safe communication e2ee
+  # signing key, identity key, signed prekey, signature and 50 one time keys
   def e2ee_keys_share(handshake_info, nonce_session)
     db = open_db(DB_FILE)
 
@@ -987,7 +1020,7 @@ class SecureClient
     raise  
   end
 
-  # ask the user to provide a valid voucher and also recover the nickname from the db,
+  # registers the client with the server, sends to the server the registration voucher
   def registration_request(handshake_info, nonce_session)
     db = open_db(DB_FILE)
 
@@ -1062,7 +1095,11 @@ class SecureClient
   end
 
 
-   # used to establish a safe comunication channel with the server
+  # used to establish a safe comunication channel with the server
+  # sends the first nonce in order to have a fresh communication everytime 
+  # the server answers, it's identity if verified
+  # returns the handshake_info material used for all the communication with the server
+  # included the sock, the secure box and keys
   def hello_server()
     # Ephemeral client key
     eph_sk = RbNaCl::PrivateKey.generate
@@ -1116,6 +1153,7 @@ class SecureClient
 
 
   # the initialization method
+  # takes the signing keys and makes them available for later usage
   def initialize(host, port)
     @host, @port = host, port
 
@@ -1196,8 +1234,8 @@ def show_chat(username)
         username.force_encoding("UTF-8")
         )
     end
-  rescue
-    raise ProtocolError, "Some db operation didn't work out"
+  rescue => e
+    raise ProtocolError, "Some db operation didn't work out #{e.message}"
   end
   puts "#{username}:"
   messages.each do |msg|
@@ -1227,6 +1265,7 @@ end
 
 
 # cleans a message from potential injection characters
+# so it can be safely displayed on a terminal
 def safe_terminal_print(str)
   str
     .encode("UTF-8", invalid: :replace, undef: :replace, replace: "�")
@@ -1237,7 +1276,7 @@ rescue => e
 end
 
 
-# to handle the client shutdown
+# to handle the client shutdown cleanly: close db and close tcp connection
 def shutdown(handshake_info, db, exit_code: 0)
   puts "\nShutting down…"
 
@@ -1267,11 +1306,13 @@ def shutdown(handshake_info, db, exit_code: 0)
 end
 
 
-
+# The first method called 
 def main
 
 handshake_info = nil
 nonce_session = nil
+
+  # check that the database has been created
   if !File.exist?(DB_FILE)
     puts "Please run the client_setup.rb file first"
     exit
@@ -1282,13 +1323,15 @@ nonce_session = nil
   db = open_db(DB_FILE)
   puts "Schat. SecureChat client v1.0"
 
+  # make sure the server fingerprint has been registered
   server_id = db.execute("SELECT id FROM server_identity")
   if server_id.empty? == true
     server_fingerprint_registration()
   end
 
+  client = SecureClient.new(ARGV[0], ARGV[1].to_i)
   
-  
+  # the main menu with the options to interact with the client
   loop do
   puts "\n"
   puts "Choose an option:"
@@ -1303,7 +1346,8 @@ nonce_session = nil
   puts "9) show users to interact with"
   puts "11) to close"
   choice = STDIN.gets.strip.to_i
-  
+
+  # offline options
   if choice == 1 || choice == 8 || choice == 9 || choice == 11
     case choice
     when 1
@@ -1327,15 +1371,14 @@ nonce_session = nil
     end
     next
   end
-  
+
+  # initialize the tcp, establish first communication and create a new nonce 
   unless handshake_info && nonce_session
-  binding.pry
-    client = SecureClient.new(ARGV[0], ARGV[1].to_i)
     handshake_info = client.hello_server()
     nonce_session = Session.new("server", handshake_info[:client_nonce])
   end
 
-
+  # menu with all entries after connection is established
   case choice
     when 1
       # - used to register a server with a previously shared public key / fingerprint

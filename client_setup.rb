@@ -21,7 +21,7 @@ MESSAGES = 'messages'
 
 begin
 
-  db_path = File.join(Dir.pwd, "schat_db", "client1.db")
+  db_path = File.join(Dir.pwd, "schat_db", "client2.db")
   db_dir = File.join(__dir__, "schat_db")
 
   if File.exist?(db_path)

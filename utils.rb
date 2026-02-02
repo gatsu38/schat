@@ -100,20 +100,23 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-  # helper wrapper to obtain the shared secret from two keys
+  # helper wrapper to obtain the shared secret from two keys (diffie-hellman)
   def dh(private_key, public_key)
-    pk_encoded = public_key.force_encoding("BINARY")
-    sk_encoded = public_key.force_encoding("BINARY")
+    pk_encoded = public_key.dup.force_encoding("BINARY")
+    sk_encoded = private_key.dup.force_encoding("BINARY")
     box = RbNaCl::Box.new(pk_encoded, sk_encoded)
 
     out = "\x00" * 32
     returned = box.crypto_box_curve25519xsalsa20poly1305_beforenm(out, public_key, private_key)
     raise "Shared secret creation failed" unless returned == 0
+    binding.pry
     out
   end
 
 
   # obtains the keys needed for the e2ee between two clients
+  # method called by both server and client to obtain:
+  # username, signing_key, identity key, signed_key, signature, one time key(s)
   def e2ee_keys_share_receiver(payload, handshake_info)
     offset = 0
     username_size_header = read_exact(payload, offset, 1)
@@ -273,8 +276,6 @@ MAX_FIELD_SIZE = 1024
   end
 
 
-
-
   # helper function used to read exactly the required size from a buffer
   def read_exact(buf, offset, len)
     chunk = buf[offset, len]
@@ -363,6 +364,9 @@ MAX_FIELD_SIZE = 1024
   end
 end
 
+# it is used to create the chain keys for e2ee
+# the method expand takes the root key, a label ("A-TO-B, B-TO-A") and the bytesize
+# returns the chain key bytes
 module HKDF
   HASH_LEN = 32
 

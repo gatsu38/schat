@@ -33,6 +33,12 @@ include Builders
   # safe database shutdown
 # generate_vouchers
   # create the vouchers
+
+if ARGV.length != 2
+  puts "Usage: ruby server.rb <server_ip> <port>"
+  exit 1
+end
+  
 puts "Please provide the db password"
 MASTER_KEY = prompt_password("DB password: ")
 DB_FILE = File.join(Dir.pwd, "schat_db", "schat1.db")
@@ -426,6 +432,7 @@ class SecureServer
 
   # usfed to receive the hello message from client, called from hello_client
   def receive_hello(sock)
+    
     puts "receive hello nonce"
     blob = read_blob(sock)
     raise IOError, "wrong hello size" if blob.bytesize != 30 + 1 + 15
@@ -459,6 +466,7 @@ class SecureServer
       raise IOError, "Invalid nonce size: #{nonce.bytesize}"
     end
     client_nonce
+    
   rescue => e
     raise
   end
@@ -546,6 +554,7 @@ class SecureServer
       self.shutdown(tcp_server) if tcp_server
     end
   end
+
 
   # safe database shutdown
   def shutdown(tcp_server)

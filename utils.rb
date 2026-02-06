@@ -109,7 +109,6 @@ MAX_FIELD_SIZE = 1024
     out = "\x00" * 32
     returned = box.crypto_box_curve25519xsalsa20poly1305_beforenm(out, public_key, private_key)
     raise "Shared secret creation failed" unless returned == 0
-    binding.pry
     out
   end
 
@@ -118,6 +117,10 @@ MAX_FIELD_SIZE = 1024
   # method called by both server and client to obtain:
   # username, signing_key, identity key, signed_key, signature, one time key(s)
   def e2ee_keys_share_receiver(payload, handshake_info)
+    if payload == "\x01"
+      puts "The server does not have valid one time keys for the given user"
+      return
+    end
     offset = 0
     username_size_header = read_exact(payload, offset, 1)
     username_size = username_size_header.unpack1("C")

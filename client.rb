@@ -226,7 +226,6 @@ class SecureClient
   # receive messages for an already established session
   def e2ee_receive_established_sessions(remaining_message, username)
     offset = 0
-    
     nonce_size_header = read_exact(remaining_message, offset, 2)
     nonce_size = nonce_size_header.unpack1("n")
     offset += 2
@@ -255,6 +254,12 @@ class SecureClient
         SQL
         username.force_encoding("UTF-8")
       )
+
+      if previous_session.nil?
+        puts "The message claims a session already existed but it does not."
+        return
+      end
+      
       id_pub_keys = db.execute(<<~SQL,
         SELECT user.identity_public_key AS local, cli.identity_public_key AS remote
         FROM user JOIN clients_info cli
@@ -266,6 +271,7 @@ class SecureClient
     rescue
       raise ProtocolError, "Something wrong happened during db operations"
     end
+
 
     local_id_pub_key = id_pub_keys[0]["local"]
     remote_id_pub_key = id_pub_keys[0]["remote"]
@@ -302,12 +308,10 @@ class SecureClient
       
       decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
     end
-
     message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
     recv_index += 1
-
     plain_text = secret_root_box.open(nonce, ciphertext)
     db.transaction do
       db.execute(<<~SQL,
@@ -355,7 +359,6 @@ class SecureClient
     rescue
       raise "Couldn't fetch previous sessions details"
     end
-
     local_id_pub_key = id_pub_keys[0]["local"]
     remote_id_pub_key = id_pub_keys[0]["remote"]
 
@@ -368,7 +371,6 @@ class SecureClient
     end
     send_chain_key = previous_session["#{send_dir}_chain_key"]
     send_index = previous_session["#{send_dir}_index"]
-
     message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
@@ -447,17 +449,9 @@ class SecureClient
       )
     case flag
     when "\x0f"
-      #if session == nil
         e2ee_peer_first_message(remaining_message, username)
-      #else
-      #  raise ProtocolError, "There is already an active session among the users, but the remote asks for a fresh session"
-      #end  
     when "\x10"
-      if session == nil
-        raise ProtocolError, "There is no active session among the users, but the remot user asks to continue a pre established one"
-      else
         e2ee_receive_established_sessions(remaining_message, username)    
-      end
     end
   rescue => e
     raise  
@@ -638,6 +632,7 @@ class SecureClient
     dh3 = dh(local_signed_pri_key, remote_eph_pub_key)
     dh4 = dh(local_ot_pri_key, remote_eph_pub_key)
 
+    
     combined_secrets = dh1+dh2+dh3+dh4
     root_key = HKDF.extract(combined_secrets)
 
@@ -653,7 +648,6 @@ class SecureClient
     message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
-
     recv_index += 1
     send_index = 0
     plain_text = secret_root_box.open(nonce, ciphertext)
@@ -662,13 +656,28 @@ class SecureClient
     begin
       db.transaction do
         local_id = db.get_first_value("SELECT id FROM user")
-        username_id = db.execute(<<~SQL,
-          INSERT INTO clients_info (username, signing_public_key, identity_public_key, signed_prekey_sig)
-          VALUES (?, ?, ?, ?)
-          RETURNING id
-        SQL
-        [username.force_encoding("UTF-8"), remote_signing_pub_key, remote_id_pub_key, signature]
-        )
+
+        username_exist = db.execute("SELECT id FROM clients_info WHERE username = ?", username.force_encoding("UTF-8"))
+
+        if username_exist.empty?
+          username_id = db.execute(<<~SQL,
+            INSERT INTO clients_info (username, signing_public_key, identity_public_key, signed_prekey_sig)
+            VALUES (?, ?, ?, ?)
+            RETURNING id
+          SQL
+          [username.force_encoding("UTF-8"), remote_signing_pub_key, remote_id_pub_key, signature]
+          )
+        else
+          username_id = db.execute(<<~SQL,
+            UPDATE clients_info
+            SET signing_public_key = ?, identity_public_key = ?, signed_prekey_sig = ?
+            WHERE username = ?
+            RETURNING id
+          SQL
+          [remote_signing_pub_key, remote_id_pub_key, signature, username.force_encoding("UTF-8")]
+          )
+        end
+          
         db.execute(<<~SQL,
           INSERT INTO messages (sender_id, message, counter) 
           VALUES (?, ?, ?)
@@ -685,7 +694,7 @@ class SecureClient
           (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})
           VALUES (?, ?, ?, ?, ?, ?, ?)
         SQL
-        [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, recv_chain_key, recv_index]
+        [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, next_recv_chain_key, recv_index]
         )
         db.execute(<<~SQL,
           DELETE FROM one_time_prekeys 
@@ -773,6 +782,7 @@ class SecureClient
       message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
       secret_root_box = RbNaCl::SecretBox.new(message_key)
       next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
+      binding.pry
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end
@@ -1375,7 +1385,10 @@ nonce_session = nil
   # initialize the tcp, establish first communication and create a new nonce 
   unless handshake_info && nonce_session
     handshake_info = client.hello_server()
-    nonce_session = Session.new("server", handshake_info[:client_nonce])
+    if handshake_info.nil?
+    next
+    end
+      nonce_session = Session.new("server", handshake_info[:client_nonce])
   end
 
   # menu with all entries after connection is established

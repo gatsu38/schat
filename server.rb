@@ -126,7 +126,6 @@ class SecureServer
   # forward messages to the requester
   def e2ee_message_harvester(message, handshake_info)
     db = open_db(DB_FILE)
-
     sock = handshake_info[:sock]
     safe_box = handshake_info[:client_box]
     client_signing_pk = handshake_info[:client_pk].to_bytes
@@ -377,18 +376,21 @@ class SecureServer
         SQL
         [id]
       )
-      raise "No available one-time prekeys" if one_time_key.nil?
     end
     
     # prepare the one time key, is a lil messed up to be compatible with the builder which is used by the client as well
     one_time_prekey = []
-    one_time_key = one_time_key.transform_keys(&:to_sym)
+    if one_time_key.nil?
+      no_otk_flag = "\x01"
+      message = MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE + no_otk_flag
+      return message
+    else
+      one_time_key = one_time_key.transform_keys(&:to_sym)
+    end
+      
     one_time_prekey << {pk: one_time_key[:opk_pub], counter: one_time_key[:counter]}
-
     payload = e2ee_builder(username, signing_public_key, identity_public_key, signed_prekey_pub, signed_prekey_sig, one_time_prekey, 0)
-
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
+    puts "#{payload}"
 
     message = MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE + payload
     message    

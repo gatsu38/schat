@@ -36,7 +36,7 @@ end
 
 puts "Please provide the db password"
 MASTER_KEY = prompt_password("DB password: ")
-DB_FILE = File.join(Dir.pwd, "schat_db", "client1.db")
+DB_FILE = File.join(Dir.pwd, "schat_db", "client2.db")
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -127,6 +127,7 @@ class SecureClient
   # in case a message arrives that has an index higher than the expected one, we store 
   # for later reference the keys to decipher the old messages
   def store_skipped_keys(session_id, key, counter, nonce)
+    binding.pry
     db = open_db(DB_FILE)
 
     begin
@@ -141,7 +142,7 @@ class SecureClient
       counter_packed = [counter].pack("N")
     
       if keys_blob == nil
-        keys_blob = key + counter_packed
+        keys_blob = key + counter_packed + nonce
       else
         keys_blob = keys_blob + key + counter_packed + nonce
       end   
@@ -154,8 +155,8 @@ class SecureClient
       [keys_blob, session_id]
       )
 
-    rescue
-      raise ProtocolErro, "Something wrong happened during db operation"
+    rescue => e
+      raise e
     end
   rescue => e
     raise
@@ -182,20 +183,16 @@ class SecureClient
       raise ProtocolError, "Something Wrong happened during db operations"
     end
     
-    unless keys_blob.bytesize % 50 == 0
-      raise ProtocolError "Something wrong happened during keys recovery, some might be lost for good"
-    end  
+    total_keys = keys_blob.bytesize / 60
 
-    total_keys = keys_blob.bytesize / 50
-
-    # p is used to obtain the right position for each blob is 50 bytes: 32 key, 4 index key, 24 nonce to decipher 
+    # p is used to obtain the right position for each blob is 60 bytes: 32 key, 4 index key, 24 nonce to decipher 
     total_keys.times do |i|
       p = i * (32 + 4 + 24) 
       index = keys_blob[p+32..p+35]
-
+      binding.pry
       if index.unpack1("N") == counter
         message_key = keys_blob[p+0..p+31]
-        nonce = keys_blob[p+36..p+49]
+        nonce = keys_blob[p+36..p+59]
         break
 
       end
@@ -207,12 +204,24 @@ class SecureClient
     #how do I fix that this message is out of place? Should I add a time and date from the sender side? 
     # maybe from server side?
     begin
-      db.execute(<<~SQL,
-        INSERT INTO messages (sender_id, message, counter)
-        VALUES (?, ?, ?)
-      SQL
-      [previous_session["remote_id"], plain_text, counter]
-      )
+      db.transaction do
+        exist = db.get_first_value(<<~SQL,
+          SELECT id FROM messages 
+          WHERE counter = ?
+        SQL
+        counter
+        )
+
+        unless exist.nil?
+          return true
+        end
+        db.execute(<<~SQL,
+          INSERT INTO messages (sender_id, message, counter)
+          VALUES (?, ?, ?)
+        SQL
+        [previous_session["remote_id"], plain_text, counter]
+        )
+      end
     rescue
       raise ProtocolError, "Something Wrong happened during db operations"
     end
@@ -237,7 +246,6 @@ class SecureClient
     counter_header = read_exact(remaining_message, offset, 4)
     counter = counter_header.unpack1("N")
     offset += 4
-
     raise ProtocolError, "Mismatch between declared size and received message" unless remaining_message.bytesize == 2 + 4 + 4 + nonce_size + ciphertext_size
 
     nonce = read_exact(remaining_message, offset, nonce_size)
@@ -268,8 +276,8 @@ class SecureClient
         previous_session["remote_id"]
       )
 
-    rescue
-      raise ProtocolError, "Something wrong happened during db operations"
+    rescue => e
+      raise e
     end
 
 
@@ -287,7 +295,7 @@ class SecureClient
     recv_chain_key = previous_session["#{recv_dir}_chain_key"]
     recv_index = previous_session["#{recv_dir}_index"]
 
-
+    binding.pry
     if counter > recv_index
       difference = counter - recv_index
 
@@ -307,30 +315,41 @@ class SecureClient
       difference = recv_index - counter
       
       decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
-    end
+   end
     message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     next_recv_chain_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("CHAIN".b)
     recv_index += 1
     plain_text = secret_root_box.open(nonce, ciphertext)
     db.transaction do
+      exist = db.get_first_value(<<~SQL,
+        SELECT id FROM messages WHERE counter = ?
+      SQL
+      counter
+      )
+
+      unless exist.nil?
+        return true
+      end  
+      
       db.execute(<<~SQL,
         INSERT INTO messages (sender_id, message, counter)
         VALUES (?, ?, ?)
       SQL
       [previous_session["remote_id"], plain_text, recv_index - 1]
       )
-      
       r_key = "#{recv_dir}_chain_key"
       r_index = "#{recv_dir}_index"
+      
       db.execute(<<~SQL,
         UPDATE sessions
         SET #{r_key} = ?, #{r_index} = ?
-        WHERE id = ?
+        WHERE remote_id = ?
       SQL
       [next_recv_chain_key, recv_index, previous_session["remote_id"]]
       )
     end  
+  return true  
   rescue => e
     raise  
   ensure
@@ -393,7 +412,6 @@ class SecureClient
       ciphertext
      
     send_index += 1
-    
     username_size = [username.bytesize].pack("C")
     payload_size = [payload.bytesize].pack("N")
     
@@ -449,10 +467,15 @@ class SecureClient
       )
     case flag
     when "\x0f"
-        e2ee_peer_first_message(remaining_message, username)
+       saved = e2ee_peer_first_message(remaining_message, username)
     when "\x10"
-        e2ee_receive_established_sessions(remaining_message, username)    
+       saved = e2ee_receive_established_sessions(remaining_message, username)    
     end
+    
+    unless saved == true
+      return false
+    end
+    
   rescue => e
     raise  
   ensure
@@ -468,6 +491,7 @@ class SecureClient
     messages_count_header = read_exact(handled_payload, offset, 2)
     messages_count = messages_count_header.unpack1("n")
     offset += 2
+    counter_confirmation = 0
     messages_count.times do
       username_size_header = read_exact(handled_payload, offset, 1)
       username_size = username_size_header.unpack1("C")
@@ -482,8 +506,18 @@ class SecureClient
       
       message = read_exact(handled_payload, offset, message_size)
       offset += message_size
-      e2ee_client_message_parser(message, username)    
+      saved = e2ee_client_message_parser(message, username)    
+      if saved == true
+        counter_confirmation += 1
+      end
     end
+  
+    if counter_confirmation == messages_count  
+      return true
+    else
+      return false
+    end
+    
   rescue => e
     raise  
   end
@@ -703,9 +737,10 @@ class SecureClient
         local_ot_pub_key_used  
         )
       end
-    rescue
-      raise ProtocolError, "Coulnd't save the user message on the local db"
+    rescue => e
+      raise e
     end
+    return true
   rescue => e
     raise  
   ensure
@@ -725,12 +760,12 @@ class SecureClient
 
     # verifies that a session doesn't already exist
     existing_session_id = db.get_first_value(<<~SQL,
-      SELECT id FROM sessions WHERE (SELECT id FROM clients_info WHERE username = ?)
+      SELECT id FROM sessions 
+      WHERE remote_id = (SELECT id FROM clients_info WHERE username = ?)
     SQL
     username.force_encoding("UTF-8")
     )
-
-    if existing_session_id
+    unless existing_session_id.nil?
       puts "A session with this user already exists exiting"
       e2ee_continue_chat(username, handshake_info, nonce_session)
       return 0
@@ -782,7 +817,6 @@ class SecureClient
       message_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("MESSAGE".b)
       secret_root_box = RbNaCl::SecretBox.new(message_key)
       next_send_chain_key = RbNaCl::HMAC::SHA256.new(send_chain_key).auth("CHAIN".b)
-      binding.pry
     rescue
       raise ProtocolError, "Something wrong happened with the shared secrets creation."
     end

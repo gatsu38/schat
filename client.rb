@@ -127,7 +127,6 @@ class SecureClient
   # in case a message arrives that has an index higher than the expected one, we store 
   # for later reference the keys to decipher the old messages
   def store_skipped_keys(session_id, key, counter, nonce)
-    binding.pry
     db = open_db(DB_FILE)
 
     begin
@@ -189,7 +188,6 @@ class SecureClient
     total_keys.times do |i|
       p = i * (32 + 4 + 24) 
       index = keys_blob[p+32..p+35]
-      binding.pry
       if index.unpack1("N") == counter
         message_key = keys_blob[p+0..p+31]
         nonce = keys_blob[p+36..p+59]
@@ -295,7 +293,6 @@ class SecureClient
     recv_chain_key = previous_session["#{recv_dir}_chain_key"]
     recv_index = previous_session["#{recv_dir}_index"]
 
-    binding.pry
     if counter > recv_index
       difference = counter - recv_index
 
@@ -962,9 +959,15 @@ class SecureClient
       username_size +
       username
     server_answer = finalizer(nonce_session, handshake_info, username_payload)
+
+    if server_answer == "\xff".b
+      puts "Username not found on server "
+      raise ProtocolError, "Username not found"
+    end
+
     handler_caller(server_answer)
   rescue => e
-    raise  
+    puts "#{e}"
   end
 
 

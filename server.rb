@@ -395,7 +395,7 @@ class SecureServer
     message = MSG_SERVER_E2EE_KEYS_REQUEST_RESPONSE + payload
     message    
   rescue => e
-    raise    
+    return "\xff"    
   ensure
     db&.close  
   end

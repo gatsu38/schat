@@ -723,12 +723,15 @@ class SecureClient
         s_index = "#{send_dir}_index"
         r_key   = "#{recv_dir}_chain_key"
         r_index = "#{recv_dir}_index"
+
+        # removed the root key from the session insertion
+        
         db.execute(<<~SQL,
           INSERT INTO sessions
-          (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          (local_id, remote_id, #{s_key}, #{s_index}, #{r_key}, #{r_index})
+          VALUES (?, ?, ?, ?, ?, ?)
         SQL
-        [local_id, username_id[0]["id"], root_key, send_chain_key, send_index, next_recv_chain_key, recv_index]
+        [local_id, username_id[0]["id"], send_chain_key, send_index, next_recv_chain_key, recv_index]
         )
         db.execute(<<~SQL,
           DELETE FROM one_time_prekeys 
@@ -886,10 +889,10 @@ class SecureClient
         db.execute(
           <<~SQL,
             INSERT INTO sessions
-            (local_id, remote_id, root_key, #{s_key}, #{s_index}, #{r_key}, #{r_index})  
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (local_id, remote_id, #{s_key}, #{s_index}, #{r_key}, #{r_index})  
+            VALUES (?, ?, ?, ?, ?, ?)
           SQL
-          [local_id, remote_id, root_key, next_send_chain_key, send_index, recv_chain_key, recv_index]
+          [local_id, remote_id, next_send_chain_key, send_index, recv_chain_key, recv_index]
         )
 
         end

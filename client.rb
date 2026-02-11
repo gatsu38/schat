@@ -2,32 +2,12 @@ require 'socket'
 require 'rbnacl'
 require_relative 'utils'
 require_relative 'builders'
-require 'pry'
-require 'pry-byebug'
 require 'sqlite3'
 
 include Utils
 include Builders
 include HKDF
 
-
-# LIST OF FUNCTIONS
-# the first method called to send a message to another client: computes the shared secret root key
-  # e2ee_first_message
-# called during hello_client to check if the public key matches the registered server
-  # server_fingerprint_check(remote_pk)
-# ask the user to provide the server fingerprint, use it later to check the server identity
-  # server_fingerprint_registration() 
-# initialize the connection with the server
-  # hello_server()
-# handles the returned value from the server at the end of the user registration
-  # def registration_confirmation(confirmation_byte)
-# ask the user to provide a valid voucher and also recover the nickname from the db
-  # def registration_request(handshake_info, nonce_session)
-# the hello method that asks the server to save the 
-  # def e2ee_keys_share(handshake_info, nonce_session)
-# main method
-  # main()
 
 if ARGV.length != 2
   puts "Usage: ruby client.rb <server_ip> <port>"
@@ -36,7 +16,7 @@ end
 
 puts "Please provide the db password"
 MASTER_KEY = prompt_password("DB password: ")
-DB_FILE = File.join(Dir.pwd, "schat_db", "client2.db")
+DB_FILE = File.join(Dir.pwd, "schat_db", "client1.db")
 PROTOCOL_NAME = "myproto-v1"
 MAX_PROTO_FIELD = 30
 MSG_CLIENT_HELLO_ID = "\x01"
@@ -72,28 +52,18 @@ class SecureClient
 
 
   # reads the message ID and calls the appropriate message handler
-  def handler_caller(message, handshake_info = nil)
+  def handler_caller(message, handshake_info = nil, nonce_session = nil)
     offset = 0
     id = read_exact(message, offset, 1)
     handled_message = message.byteslice(1..)
 
     case id
-      when "\x04"
-      response = registration_request_handler(handled_message, handshake_info)
       when "\x05"
       response = registration_confirmation(handled_message)
-      when "\x08"
-      response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
-      when "\x09"
-      response = e2ee_keys_request_receiver(handled_message, handshake_info)
       when "\x0a"
       response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
-      when "\x0b"
-      response = e2ee_message_receiver(handled_message, handshake_info)
-      when "\x0d"
-      response = e2ee_message_harvester(handled_message, handshake_info)
       when "\x0e"
-      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
+      response = e2ee_read_server_messages_blob(handled_message, handshake_info, nonce_session)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
@@ -196,6 +166,9 @@ class SecureClient
       end
     end
 
+    unless message_key && nonce
+      raise ProtocolError, "No message_key or nonce found"
+    end
     secret_root_box = RbNaCl::SecretBox.new(message_key)
     plain_text = secret_root_box.open(nonce, ciphertext)
 
@@ -224,7 +197,7 @@ class SecureClient
       raise ProtocolError, "Something Wrong happened during db operations"
     end
   rescue => e  
-    raise
+    puts "Seems impossible to recover lost messages"
   ensure
     db&.close
   end
@@ -292,7 +265,6 @@ class SecureClient
 
     recv_chain_key = previous_session["#{recv_dir}_chain_key"]
     recv_index = previous_session["#{recv_dir}_index"]
-
     if counter > recv_index
       difference = counter - recv_index
 
@@ -307,11 +279,12 @@ class SecureClient
 
         store_skipped_keys(previous_session["id"], message_key, recv_index + i, nonce)
       end
-
+      return true
     elsif counter < recv_index
       difference = recv_index - counter
       
       decipher_old_messages(counter, previous_session["id"], ciphertext, previous_session["remote_id"], recv_index)    
+      return true
    end
     message_key = RbNaCl::HMAC::SHA256.new(recv_chain_key).auth("MESSAGE".b)
     secret_root_box = RbNaCl::SecretBox.new(message_key)
@@ -324,7 +297,6 @@ class SecureClient
       SQL
       counter
       )
-
       unless exist.nil?
         return true
       end  
@@ -337,7 +309,6 @@ class SecureClient
       )
       r_key = "#{recv_dir}_chain_key"
       r_index = "#{recv_dir}_index"
-      
       db.execute(<<~SQL,
         UPDATE sessions
         SET #{r_key} = ?, #{r_index} = ?
@@ -422,7 +393,6 @@ class SecureClient
     message_sliced = message.byteslice(1..)
     digest = RbNaCl::Hash.sha256(message_sliced)
     server_answer = finalizer(nonce_session, handshake_info, message)
-    puts "as"
     if server_answer == digest 
       puts "Message properly uploaded"   
 
@@ -483,7 +453,7 @@ class SecureClient
   # reads all the messages sent from the server
   # sees how many messages are in the queue, who is the sender 
   # checks if this is a new or old communication session
-  def e2ee_read_server_messages_blob(handled_payload, handled_client)
+  def e2ee_read_server_messages_blob(handled_payload, handshake_info, nonce_session)
     offset = 0
     messages_count_header = read_exact(handled_payload, offset, 2)
     messages_count = messages_count_header.unpack1("n")
@@ -510,6 +480,8 @@ class SecureClient
     end
   
     if counter_confirmation == messages_count  
+      digest = RbNaCl::Hash.sha256(handled_payload)
+      server_answer = finalizer(nonce_session, handshake_info, digest)
       return true
     else
       return false
@@ -565,7 +537,7 @@ class SecureClient
     message = MSG_CLIENT_E2EE_ASK_MESSAGES
 
     server_answer = finalizer(nonce_session, handshake_info, message)
-    handler_caller(server_answer)
+    handler_caller(server_answer, handshake_info, nonce_session)
   rescue => e
     raise  
   end
@@ -1456,6 +1428,8 @@ nonce_session = nil
 
     when 7
       loop do
+        puts "available users:"
+        show_users()
         puts "Choose a username to interact with"
 
         username = STDIN.gets.strip

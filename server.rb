@@ -1,38 +1,12 @@
-require 'ed25519'
 require 'socket'
 require 'rbnacl'
-require 'openssl'
-require 'securerandom'
 require 'concurrent-ruby'
 require_relative 'utils'
 require_relative 'builders'
-require 'pry'
-require 'pry-byebug'
 require 'sqlite3'
 
 include Utils
 include Builders
-
-
-# METHODS
-# receive_hello
-  # used to receive the hello message from client containing the client nonce
-# hello_client
-  # executes the hello client protocol, after this a secret is shared
-# registrate_new_user(nickname, handshake_info, db)
-  # register the user on the db with the publik_key
-#  registration_request_handler(message, handshake_info)
-  # handle the registration of a new user
-#  e2ee_server_request_receiver(username, handshake_info)
-  # provides a client with the requested keys for the e2ee for a given user
-# handle_client(handshake_info, sock)
-  # this method is used to handle all the messages received from a single client after hello
-# run
-  # spawns a new thread for each new client connection
-# shutdown
-  # safe database shutdown
-# generate_vouchers
-  # create the vouchers
 
 if ARGV.length != 2
   puts "Usage: ruby server.rb <server_ip> <port>"
@@ -78,7 +52,7 @@ end
 class SecureServer
 
   # reads the message ID and calls the appropriate message handler
-  def handler_caller(message, handshake_info = nil)
+  def handler_caller(message, handshake_info = nil, nonce_session = nil, sock = nil)
     offset = 0
     id = read_exact(message, offset, 1)
     handled_message = message.byteslice(1..)
@@ -96,20 +70,14 @@ class SecureServer
     case id
       when "\x04"
       response = registration_request_handler(handled_message, handshake_info)
-      when "\x05"
-      response = registration_confirmation(handled_message)
       when "\x08"
       response = e2ee_server_share_receiver_wrapper(handled_message, handshake_info)
       when "\x09"
       response = e2ee_keys_request_receiver(handled_message, handshake_info)
-      when "\x0a"
-      response = e2ee_client_share_receiver_wrapper(handled_message, handshake_info)
       when "\x0b"
       response = e2ee_message_receiver(handled_message, handshake_info)
       when "\x0d"
-      response = e2ee_message_harvester(handled_message, handshake_info)
-      when "\x0e"
-      response = e2ee_read_server_messages_blob(handled_message, handshake_info)
+      response = e2ee_message_harvester(handled_message, handshake_info, nonce_session, sock)
     else
       raise ProtocolError, "Unknown message id: #{id.unpack1('H*')}"
     end
@@ -124,10 +92,9 @@ class SecureServer
 
 
   # forward messages to the requester
-  def e2ee_message_harvester(message, handshake_info)
+  def e2ee_message_harvester(message, handshake_info, nonce_session, sock)
     db = open_db(DB_FILE)
-    sock = handshake_info[:sock]
-    safe_box = handshake_info[:client_box]
+
     client_signing_pk = handshake_info[:client_pk].to_bytes
     rows = nil
     begin
@@ -135,7 +102,7 @@ class SecureServer
         client_id = db.get_first_value("SELECT id FROM clients_info WHERE signing_public_key = ?", client_signing_pk)
         
         rows = db.execute(<<~SQL, client_id)
-          SELECT m.message, c.username AS sender_username
+          SELECT m.id, m.message, c.username AS sender_username
           FROM messages m
           JOIN clients_info c ON m.sender_id = c.id
           WHERE m.recipient_id = ?
@@ -157,8 +124,42 @@ class SecureServer
         row["sender_username"] +
         row["message"]
     end
+
+    digest = RbNaCl::Hash.sha256(payload)
     message = MSG_SERVER_E2EE_DELIVER_MESSAGES + payload
-    message
+    box = handshake_info[:server_box]
+    sender(sock, box, nonce_session, message)
+    
+    loop_breaker = 0
+    blob = nil
+    loop do
+      begin
+      blob = read_blob(sock)
+      break
+      rescue Timeout::Error
+        if loop_breaker >= 3
+          break
+        end
+        loop_breaker += 1
+        next
+      rescue EOFError
+        break
+      rescue StandardError => e
+        puts "Error during message reception: #{e.message}"
+        break
+      end
+      loop_breaker += 1
+    end
+    client_digest = decipher(blob, box)
+
+    if digest == client_digest
+      message_ids = rows.map { |r| r["id"] }
+      return "\x01" if message_ids.empty?
+      placeholder = message_ids.map { "?" }.join(",")
+
+      db.execute("DELETE FROM messages WHERE id IN (#{placeholder})", message_ids)
+    end
+    return "\x01"
   rescue => e
     raise  
   ensure
@@ -419,7 +420,7 @@ class SecureServer
       begin
         blob = read_blob(sock)                    
         message = decipher(blob, box)
-        response = handler_caller(message, handshake_info)
+        response = handler_caller(message, handshake_info, nonce_session, sock)
         sender(sock, box, nonce_session, response)
       rescue Timeout::Error
         next
